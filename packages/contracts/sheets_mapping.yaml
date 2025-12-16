@@ -1,0 +1,67 @@
+version: 1
+
+spreadsheet:
+  # use env GOOGLE_SHEET_ID for the actual id
+  tabs:
+    checkin: "CheckIN"
+    project: "Project"
+    ccp: "CCP"
+    conversation: "Conversation"
+    dashboard_update: "Dashboard Update"
+
+columns:
+  checkin:
+    checkin_id: "CheckIN ID"
+    legacy_id: "ID"
+    project_name: "Project Name"
+    part_number: "Part Number"
+    assembly_drawing: "Assembly Drawing"     # DO NOT ingest/embed
+    status: "Status"
+    description: "Description"
+    inspection_image_url: "Inspection Image/URL"
+
+  project:
+    project_name: "Project Name"
+    part_number: "Part Number"
+    assembly_drawing: "Assembly Drawing"     # DO NOT ingest/embed
+    internal_poc: "Internal POC"
+    dispatch_date: "Dispatch Date"
+    company_row_id: "Company Row id"
+    legacy_id: "ID"
+
+  ccp:
+    ccp_id: "CCP ID"
+    legacy_id: "ID"
+    ccp_name: "CCP Name"
+    assembly_drawing: "Assembly Drawing"     # DO NOT ingest/embed
+    description: "Description"
+    files: "Files"                           # allowed
+    photos: "Photos"                         # allowed
+    main_image: "Main Image"                 # allowed
+    project_name: "Project Name"
+    part_number: "Part Number"
+
+  conversation:
+    conversation_id: "Conversation ID"
+    checkin_id: "CheckIN ID"
+    photos: "Photos"
+    remark: "Remark"
+    status: "Status"
+
+  dashboard_update:
+    project_name: "Project Name"
+    part_number: "Part Number"
+    legacy_id: "ID"
+    update_message: "Update Message"
+
+writeback:
+  # where the AI reply will be written
+  ai_comment:
+    tab: "Conversation"
+    set_columns:
+      checkin_id: "CheckIN ID"
+      photos: "Photos"
+      remark: "Remark"
+      status: "Status"
+    remark_prefix: "[AI] "
+    default_status_from_checkin: true

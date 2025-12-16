@@ -1,0 +1,28 @@
+# env
+.env
+*.env
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+pip-wheel-metadata/
+
+# editors
+.vscode/
+.idea/
+.DS_Store
+
+# logs
+*.log
+
+# temp/artifacts
+artifacts/
+tmp/

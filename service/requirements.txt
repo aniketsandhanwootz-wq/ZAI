@@ -1,0 +1,22 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# Google Sheets API
+google-api-python-client==2.156.0
+google-auth==2.36.0
+
+# HTTP + utils
+requests==2.32.3
+pydantic==2.10.3
+python-dotenv==1.0.1
+
+# Postgres
+psycopg2-binary==2.9.10
+
+# Redis queue
+redis==5.2.0
+rq==2.0.0
+
+# LangChain + LangGraph (code mode)
+langchain==0.3.12
+langgraph==0.2.53
