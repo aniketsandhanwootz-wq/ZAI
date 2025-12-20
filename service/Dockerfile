@@ -17,7 +17,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Copy code + packages + contracts
 COPY service/app /app/app
 COPY packages /app/packages
-COPY infra /app/infra
 
 EXPOSE 8000
 
