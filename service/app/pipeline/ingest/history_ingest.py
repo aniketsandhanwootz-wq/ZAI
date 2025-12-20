@@ -83,6 +83,17 @@ def ingest_history(settings: Settings, limit: int = 500) -> Dict[str, Any]:
 
     projects = sheets.list_projects()
 
+    projects_missing_tenant = 0
+    projects_missing_tenant_sample: List[str] = []
+
+    for pr in projects:
+        pid = _norm_value(pr.get(k_p_legacy, ""))
+        tenant_id = _norm_value(pr.get(k_p_tenant, ""))
+        if pid and not tenant_id:
+            projects_missing_tenant += 1
+            if len(projects_missing_tenant_sample) < 20:
+                projects_missing_tenant_sample.append(pid)
+
     # ---- Build project indexes (ID-first + fallback triplet) ----
     project_by_id: Dict[str, Dict[str, str]] = {}
     project_by_triplet: Dict[Tuple[str, str, str], Dict[str, str]] = {}
@@ -222,4 +233,6 @@ def ingest_history(settings: Settings, limit: int = 500) -> Dict[str, Any]:
         "missing_tenant": missing_tenant,
         "embed_errors": embed_errors,
         "note": "Uses mapping-driven + normalized keys; ID-first tenant resolution via Project tab.",
+        "projects_missing_company_row_id": projects_missing_tenant,
+        "projects_missing_company_row_id_sample_legacy_ids": projects_missing_tenant_sample,
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import hashlib
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -23,6 +24,12 @@ class VectorTool:
     def _conn(self):
         return psycopg2.connect(self.settings.database_url)
 
+    def _assert_dims(self, embedding: List[float]) -> None:
+        expected = int(getattr(self.settings, "embedding_dims", 0) or 0)
+        if expected and len(embedding) != expected:
+            raise RuntimeError(f"Embedding dims mismatch: expected {expected}, got {len(embedding)}. "
+                               f"Fix EMBEDDING_MODEL/EMBEDDING_DIMS or DB vector dims.")
+
     # ---------- INCIDENT ----------
     def upsert_incident_vector(
         self,
@@ -36,6 +43,8 @@ class VectorTool:
         status: Optional[str],
         text: str,
     ) -> None:
+        self._assert_dims(embedding)
+
         sql = """
         INSERT INTO incident_vectors
           (tenant_id, checkin_id, vector_type, embedding, project_name, part_number, legacy_id, status, summary_text)
@@ -55,17 +64,8 @@ class VectorTool:
             with conn.cursor() as cur:
                 cur.execute(
                     sql,
-                    (
-                        tenant_id,
-                        checkin_id,
-                        vector_type,
-                        _vec_literal(embedding),
-                        project_name,
-                        part_number,
-                        legacy_id,
-                        status,
-                        text,
-                    ),
+                    (tenant_id, checkin_id, vector_type, _vec_literal(embedding),
+                     project_name, part_number, legacy_id, status, text),
                 )
 
     def search_incidents(
@@ -76,6 +76,8 @@ class VectorTool:
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        self._assert_dims(query_embedding)
+
         sql = """
         SELECT
           checkin_id,
@@ -102,6 +104,7 @@ class VectorTool:
 
         with self._conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SET ivfflat.probes = 10;")
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
@@ -131,6 +134,7 @@ class VectorTool:
         source_ref: Optional[str],
         embedding: List[float],
     ) -> None:
+        self._assert_dims(embedding)
         content_hash = _sha256(f"{ccp_id}|{chunk_type}|{chunk_text}")
 
         sql = """
@@ -153,19 +157,8 @@ class VectorTool:
             with conn.cursor() as cur:
                 cur.execute(
                     sql,
-                    (
-                        tenant_id,
-                        ccp_id,
-                        ccp_name,
-                        project_name,
-                        part_number,
-                        legacy_id,
-                        chunk_type,
-                        chunk_text,
-                        source_ref,
-                        _vec_literal(embedding),
-                        content_hash,
-                    ),
+                    (tenant_id, ccp_id, ccp_name, project_name, part_number, legacy_id,
+                     chunk_type, chunk_text, source_ref, _vec_literal(embedding), content_hash),
                 )
 
     def search_ccp_chunks(
@@ -176,6 +169,8 @@ class VectorTool:
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        self._assert_dims(query_embedding)
+
         sql = """
         SELECT
           ccp_id,
@@ -199,6 +194,7 @@ class VectorTool:
 
         with self._conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SET ivfflat.probes = 10;")
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
@@ -211,8 +207,3 @@ class VectorTool:
             }
             for r in rows
         ]
-
-    def _assert_dims(self, embedding: List[float]) -> None:
-        expected = int(getattr(self.settings, "embedding_dims", 0) or 0)
-        if expected and len(embedding) != expected:
-            raise RuntimeError(f"Embedding dims mismatch: expected {expected}, got {len(embedding)}")

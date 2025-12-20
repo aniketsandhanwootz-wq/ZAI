@@ -1,6 +1,7 @@
 from typing import Any, Dict
-from rq import Queue
+
 from redis import Redis
+from rq import Queue
 
 from .config import Settings
 from .worker_tasks import process_event_task

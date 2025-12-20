@@ -1,59 +1,104 @@
-from typing import Dict, Any
+# service/app/pipeline/graph.py
+from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
+import importlib
+import logging
+import time
+from typing import Any, Callable, Dict, List
 
 from ..config import Settings
-from .state import GraphState
-from .nodes.load_sheet_data import load_sheet_data
-from .nodes.build_thread_snapshot import build_thread_snapshot
-from .nodes.upsert_vectors import upsert_vectors
-from .nodes.retrieve_context import retrieve_context
-from .nodes.generate_ai_reply import generate_ai_reply
-from .nodes.writeback import writeback
+from .ingest.run_log import RunLog
+from ..logctx import run_id_var
+
+logger = logging.getLogger("zai.graph")
 
 
-def _route_by_event(state: GraphState) -> str:
-    # For now, everything goes through the same “checkin pipeline”.
-    # Later we can branch: CCP_UPDATED -> ccp_ingest flow etc.
-    et = state.event_type
-    if et in ("CCP_UPDATED",):
-        return "ccp_path"  # placeholder
-    return "checkin_path"
+State = Dict[str, Any]
+NodeFn = Callable[[Settings, State], State]
 
 
-def build_graph() -> Any:
-    g = StateGraph(GraphState)
-
-    g.add_node("load_sheet_data", load_sheet_data)
-    g.add_node("build_thread_snapshot", build_thread_snapshot)
-    g.add_node("upsert_vectors", upsert_vectors)
-    g.add_node("retrieve_context", retrieve_context)
-    g.add_node("generate_ai_reply", generate_ai_reply)
-    g.add_node("writeback", writeback)
-
-    # main path
-    g.set_entry_point("load_sheet_data")
-    g.add_edge("load_sheet_data", "build_thread_snapshot")
-    g.add_edge("build_thread_snapshot", "upsert_vectors")
-    g.add_edge("upsert_vectors", "retrieve_context")
-    g.add_edge("retrieve_context", "generate_ai_reply")
-    g.add_edge("generate_ai_reply", "writeback")
-    g.add_edge("writeback", END)
-
-    return g.compile()
+def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
+    mod = importlib.import_module(module_rel, package=__package__)
+    for name in candidates:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn  # type: ignore
+    raise ImportError(
+        f"Could not find a callable in {module_rel}. Tried: {candidates}. "
+        f"Available: {[x for x in dir(mod) if not x.startswith('_')]}"
+    )
 
 
-_GRAPH = build_graph()
+load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
+build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
+upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
+retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
+generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
+writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
+
+
+def _tenant_from_payload(payload: Dict[str, Any]) -> str:
+    return str(payload.get("meta", {}).get("tenant_id") or "")
 
 
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = GraphState(event=payload)
-    result_state: GraphState = _GRAPH.invoke(state, {"settings": settings})  # type: ignore
-    return {
-        "event_type": result_state.event_type,
-        "tenant_id": result_state.tenant_id,
-        "checkin_id": result_state.checkin_id,
-        "ai_reply": result_state.ai_reply,
-        "writeback_done": result_state.writeback_done,
-        "logs": result_state.logs[-30:],
+    event_type = str(payload.get("event_type") or "UNKNOWN")
+    primary_id = str(
+        payload.get("checkin_id")
+        or payload.get("conversation_id")
+        or payload.get("ccp_id")
+        or payload.get("legacy_id")
+        or "UNKNOWN"
+    )
+
+    runlog = RunLog(settings)
+    tenant_id_hint = (_tenant_from_payload(payload) or "UNKNOWN").strip()
+    run_id = runlog.start(tenant_id_hint, event_type, primary_id)
+
+    token = run_id_var.set(run_id)
+
+    # Standard dict state
+    state: State = {
+        "payload": payload,
+        "run_id": run_id,
+        "event_type": event_type,
+        "primary_id": primary_id,
+        "logs": [],
     }
+
+    def _timed(name: str, fn: NodeFn) -> State:
+        t0 = time.time()
+        logger.info("node:start %s", name)
+        out = fn(settings, state)
+        dt = (time.time() - t0) * 1000
+        logger.info("node:end %s ms=%.1f", name, dt)
+        return out
+
+    try:
+        state = _timed("load_sheet_data", load_sheet_data)
+
+        # Update tenant in runlog if resolved
+        tenant_id = str(state.get("tenant_id") or "").strip()
+        if tenant_id and tenant_id != tenant_id_hint:
+            runlog.update_tenant(run_id, tenant_id)
+
+        state = _timed("build_thread_snapshot", build_thread_snapshot)
+
+        # Upsert + retrieval require tenant_id hard
+        state = _timed("upsert_vectors", upsert_vectors)
+        state = _timed("retrieve_context", retrieve_context)
+
+        state = _timed("generate_ai_reply", generate_ai_reply)
+        state = _timed("writeback", writeback)
+
+        runlog.success(run_id)
+        logger.info("SUCCESS primary_id=%s", primary_id)
+        return {"run_id": run_id, "ok": True, "primary_id": primary_id}
+
+    except Exception as e:
+        runlog.error(run_id, str(e))
+        logger.exception("ERROR: %s", e)
+        return {"run_id": run_id, "ok": False, "error": str(e), "primary_id": primary_id}
+
+    finally:
+        run_id_var.reset(token)

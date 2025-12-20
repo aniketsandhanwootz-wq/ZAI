@@ -1,29 +1,51 @@
-from ..state import GraphState
+# service/app/pipeline/nodes/generate_ai_reply.py
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
 from ...config import Settings
 from ...tools.llm_tool import LLMTool
 
 
-def _format_context(state: GraphState) -> str:
-    parts = []
+def _format_context(state: Dict[str, Any]) -> str:
+    parts: List[str] = []
 
-    if state.similar_incidents:
+    inc = state.get("similar_incidents") or []
+    if inc:
         parts.append("Similar past incidents:")
-        for i, item in enumerate(state.similar_incidents, start=1):
-            parts.append(f"{i}. {item.get('summary','')}".strip())
+        for i, item in enumerate(inc, start=1):
+            s = (item.get("summary") or "").strip()
+            if s:
+                parts.append(f"{i}. {s}")
 
-    if state.relevant_ccp_chunks:
+    ccp = state.get("relevant_ccp_chunks") or []
+    if ccp:
         parts.append("\nRelevant CCP guidance:")
-        for i, item in enumerate(state.relevant_ccp_chunks, start=1):
-            parts.append(f"{i}. {item.get('text','')}".strip())
+        for i, item in enumerate(ccp, start=1):
+            t = (item.get("text") or "").strip()
+            name = (item.get("ccp_name") or "").strip()
+            line = f"{i}. {name}: {t}".strip() if name else f"{i}. {t}"
+            if t:
+                parts.append(line)
 
-    return "\n".join([p for p in parts if p]).strip()
+    return "\n".join(parts).strip()
 
 
-def generate_ai_reply(state: GraphState, config):
-    settings: Settings = config["settings"]
+def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
+    tenant_id = (state.get("tenant_id") or "").strip()
+    snapshot = (state.get("thread_snapshot_text") or "").strip()
+
+    # ✅ Hard safety: no tenant => do not “guess”
+    if not tenant_id:
+        state["ai_reply"] = (
+            "I couldn't map this check-in to a customer/company (missing Company row id). "
+            "Please ensure the Project tab has Company row id filled for this ID, and re-trigger. "
+            "Also share: clear inspection photo, measurement reference, and what stage/process this is at."
+        )
+        (state.get("logs") or []).append("Generated SAFE reply (missing tenant)")
+        return state
+
     llm = LLMTool(settings)
-
-    snapshot = state.thread_snapshot_text or ""
     ctx = _format_context(state)
 
     prompt = f"""
@@ -34,8 +56,9 @@ Rules:
 - Be practical, step-by-step.
 - Mention precautions to avoid repeat issues.
 - Ask for missing evidence if needed.
-- Do NOT mention assembly drawings (not provided).
+- Do NOT ask for or mention assembly drawings.
 - Keep it concise.
+- If unsure, propose verification steps not guesses.
 
 CHECKIN:
 {snapshot}
@@ -44,6 +67,6 @@ CONTEXT:
 {ctx}
 """.strip()
 
-    state.ai_reply = llm.generate_text(prompt)
-    state.logs.append("Generated AI reply")
+    state["ai_reply"] = llm.generate_text(prompt).strip()
+    (state.get("logs") or []).append("Generated AI reply")
     return state

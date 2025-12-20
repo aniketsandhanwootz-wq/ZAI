@@ -1,16 +1,15 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional
-import json
 from pathlib import Path
+from typing import Optional
 
 
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> str:
     val = os.getenv(name, default)
     if required and (val is None or str(val).strip() == ""):
         raise RuntimeError(f"Missing required env var: {name}")
-    return val  # type: ignore
+    return str(val)  # intentional string coercion
 
 
 @dataclass(frozen=True)
@@ -21,7 +20,7 @@ class Settings:
 
     # Sheets
     spreadsheet_id: str
-    google_service_account_json: str  # raw JSON string (recommended)
+    google_service_account_json: str  # raw JSON string OR file path
 
     # Webhook security
     appsheet_webhook_secret: str
@@ -40,26 +39,51 @@ class Settings:
     run_consumer: bool
     consumer_queues: str
 
+    # Migrations toggle
+    run_migrations: bool
+
 
 def load_settings() -> Settings:
-    # Note: for staging, you may keep LLM/Embedding empty and just test ingestion/writeback first.
+    # -----------------------
+    # LLM (optional Phase-0/1)
+    # -----------------------
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
     llm_model = _get_env("LLM_MODEL", "gpt-4o-mini")
 
-    embedding_provider = _get_env("EMBEDDING_PROVIDER", "openai_compat")
+    # -----------------------
+    # Embeddings (Gemini)
+    # -----------------------
+    # Gemini officially supports 1536-dim embeddings
+    embedding_provider = _get_env("EMBEDDING_PROVIDER", "gemini")
     embedding_api_key = _get_env("EMBEDDING_API_KEY", llm_api_key)
-    embedding_model = _get_env("EMBEDDING_MODEL", "text-embedding-3-small")
+    embedding_model = _get_env("EMBEDDING_MODEL", "models/embedding-001")
     embedding_dims = int(_get_env("EMBEDDING_DIMS", "1536"))
 
+    # -----------------------
+    # Runtime toggles
+    # -----------------------
     run_consumer = _get_env("RUN_CONSUMER", "1").lower() in ("1", "true", "yes")
     consumer_queues = _get_env("CONSUMER_QUEUES", "default")
+    run_migrations = _get_env("RUN_MIGRATIONS", "0").lower() in ("1", "true", "yes")
+
+    # -----------------------
+    # Sheets auth (FIXED)
+    # -----------------------
+    # IMPORTANT:
+    # os.getenv avoids the "str(None) -> 'None'" bug
+    sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    sa_raw = (sa_raw or "").strip()
+
+    # Treat literal "None" as empty
+    if not sa_raw or sa_raw.lower() == "none":
+        sa_raw = _get_env("GOOGLE_SERVICE_ACCOUNT_FILE", required=True)
 
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
         spreadsheet_id=_get_env("GOOGLE_SHEET_ID", required=True),
-        google_service_account_json=_get_env("GOOGLE_SERVICE_ACCOUNT_JSON", required=False) or _get_env("GOOGLE_SERVICE_ACCOUNT_FILE", required=True),
+        google_service_account_json=sa_raw,
         appsheet_webhook_secret=_get_env("APPSHEET_WEBHOOK_SECRET", required=True),
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
@@ -70,29 +94,36 @@ def load_settings() -> Settings:
         embedding_dims=embedding_dims,
         run_consumer=run_consumer,
         consumer_queues=consumer_queues,
+        run_migrations=run_migrations,
     )
 
 
 def parse_service_account_info(raw: str) -> dict:
     raw = (raw or "").strip()
-    if not raw:
-        # try file
-        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE")
+    if not raw or raw.lower() == "none":
+        raise RuntimeError(
+            "Missing GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE"
+        )
 
-    # If it's a file path
-    p = Path(raw)
-    if p.exists() and p.is_file():
-        return json.loads(p.read_text(encoding="utf-8"))
-
-    # If it's JSON
+    # Case 1: raw JSON string (best for Render)
     if raw.startswith("{"):
         return json.loads(raw)
 
-    # If it's a relative path (like ./gcp_key.json) from service dir
+    # Case 2: file path
+    p = Path(raw).expanduser()
+    candidates = [p]
+
+    if not p.is_absolute():
+        candidates.append((Path.cwd() / p).resolve())
+
     service_dir = Path(__file__).resolve().parents[1]
-    p2 = (service_dir / raw).resolve()
-    if p2.exists() and p2.is_file():
-        return json.loads(p2.read_text(encoding="utf-8"))
+    candidates.append((service_dir / p).resolve())
 
-    raise RuntimeError("Invalid service account input. Use GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON.")
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return json.loads(c.read_text(encoding="utf-8"))
 
+    raise RuntimeError(
+        "Invalid service account input. "
+        f"Got='{raw}'. Tried paths: {[str(x) for x in candidates]}"
+    )

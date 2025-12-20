@@ -1,20 +1,70 @@
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import Optional, Literal, Dict, Any
+from __future__ import annotations
 
-from .config import load_settings
+import uuid
+from pathlib import Path
+from typing import Optional, Literal, Dict, Any
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
+
+from .config import load_settings, Settings
 from .consumer import start_consumer_thread
 from .queue import enqueue_job
 from .pipeline.graph import run_event_graph
-
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
-from dotenv import load_dotenv
-from pathlib import Path
+from .pipeline.ingest.migrate import run_migrations
+from .logctx import setup_logging, request_id_var
 
+# Load .env from service/.env
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-app = FastAPI(title="Wootz Checkin AI (MVP)")
+setup_logging()
+import logging
+logger = logging.getLogger("zai")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = load_settings()
+    app.state.settings = settings
+    logger.info(
+        "startup: loaded settings. run_consumer=%s run_migrations=%s",
+        settings.run_consumer,
+        settings.run_migrations,
+    )
+
+    if settings.run_migrations:
+        run_migrations(settings)
+
+    if settings.run_consumer:
+        start_consumer_thread(settings)
+
+    yield
+
+
+app = FastAPI(title="Wootz Checkin AI (MVP)", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = rid
+
+    token = request_id_var.set(rid)
+    try:
+        resp = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+
+    resp.headers["x-request-id"] = rid
+    return resp
+
+
+def _get_settings(request: Request) -> Settings:
+    return request.app.state.settings  # type: ignore
 
 
 class WebhookPayload(BaseModel):
@@ -29,60 +79,49 @@ class WebhookPayload(BaseModel):
     checkin_id: Optional[str] = None
     conversation_id: Optional[str] = None
     ccp_id: Optional[str] = None
-    legacy_id: Optional[str] = None  # your common "ID" field
+    legacy_id: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
 
 
-@app.on_event("startup")
-def on_startup() -> None:
-    settings = load_settings()
-    # Start consumer loop in SAME service (MVP) if enabled
-    if settings.run_consumer:
-        start_consumer_thread(settings)
-    # (Optional) Run DB migrations here later (we’ll add in next folder)
-
-
 @app.get("/health")
-def health() -> dict:
-    return {"ok": True}
+def health(request: Request) -> dict:
+    s = _get_settings(request)
+    return {
+        "ok": True,
+        "run_consumer": s.run_consumer,
+        "run_migrations": s.run_migrations,
+    }
 
 
 @app.post("/webhook/appsheet")
 def appsheet_webhook(
+    request: Request,
     payload: WebhookPayload,
     x_appsheet_secret: Optional[str] = Header(default=None),
 ):
-    settings = load_settings()
+    settings = _get_settings(request)
     if x_appsheet_secret != settings.appsheet_webhook_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    # Enqueue a job (Redis)
     job_id = enqueue_job(settings, payload.model_dump())
     return {"ok": True, "job_id": job_id}
 
 
-# ---- Admin endpoints (staging/testing) ----
-
 @app.post("/admin/trigger")
-def admin_trigger(payload: WebhookPayload):
-    """
-    Manual trigger without AppSheet.
-    Useful for testing before bots are created.
-    """
-    settings = load_settings()
+def admin_trigger(request: Request, payload: WebhookPayload):
+    settings = _get_settings(request)
     result = run_event_graph(settings, payload.model_dump())
     return {"ok": True, "result": result}
 
 
 @app.post("/admin/ingest")
-def admin_ingest(source: Literal["projects", "ccp", "history", "all"] = "all", limit: int = 500):
-    """
-    One-time ingestion for staging.
-    - ccp: ingests CCP desc (+ direct PDF URLs if available)
-    - history: ingests existing checkins + conversations into incident_vectors
-    """
-    settings = load_settings()
-    results = {}
+def admin_ingest(
+    request: Request,
+    source: Literal["projects", "ccp", "history", "all"] = "all",
+    limit: int = 500,
+):
+    settings = _get_settings(request)
+    results: Dict[str, Any] = {}
 
     if source in ("ccp", "all"):
         results["ccp"] = ingest_ccp(settings)
