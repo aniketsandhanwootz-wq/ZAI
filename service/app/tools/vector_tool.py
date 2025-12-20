@@ -211,3 +211,8 @@ class VectorTool:
             }
             for r in rows
         ]
+
+    def _assert_dims(self, embedding: List[float]) -> None:
+        expected = int(getattr(self.settings, "embedding_dims", 0) or 0)
+        if expected and len(embedding) != expected:
+            raise RuntimeError(f"Embedding dims mismatch: expected {expected}, got {len(embedding)}")

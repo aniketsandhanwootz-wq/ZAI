@@ -9,6 +9,10 @@ from .pipeline.graph import run_event_graph
 
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
+from dotenv import load_dotenv
+from pathlib import Path
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 app = FastAPI(title="Wootz Checkin AI (MVP)")
 

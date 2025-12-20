@@ -1,17 +1,17 @@
 -- Vector indexes (HNSW) for faster similarity search
 -- Note: HNSW requires pgvector. If your DB plan is tiny, indexing may still work but slower.
 
-CREATE INDEX IF NOT EXISTS idx_incident_vectors_hnsw
-ON incident_vectors
-USING hnsw (embedding vector_cosine_ops);
+-- For high-dimensional embeddings (e.g., 3072), HNSW is not supported (>2000 dims).
+-- Use ivfflat instead. (Requires ANALYZE + lists tuning)
+CREATE INDEX IF NOT EXISTS idx_incident_vectors_ivfflat
+ON incident_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
-CREATE INDEX IF NOT EXISTS idx_ccp_vectors_hnsw
-ON ccp_vectors
-USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_ccp_vectors_ivfflat
+ON ccp_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
-CREATE INDEX IF NOT EXISTS idx_dashboard_vectors_hnsw
-ON dashboard_vectors
-USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_dashboard_vectors_ivfflat
+ON dashboard_vectors USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
 
 -- Useful metadata indexes (filters)
 CREATE INDEX IF NOT EXISTS idx_incident_meta

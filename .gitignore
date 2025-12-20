@@ -1,28 +1,39 @@
-# env
-.env
-*.env
-!.env.example
-
-# python
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-pip-wheel-metadata/
-
-# editors
-.vscode/
-.idea/
-.DS_Store
-
-# logs
 *.log
 
-# temp/artifacts
-artifacts/
-tmp/
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+
+# Local env files
+.env
+service/.env
+
+# Secrets / keys
+service/gcp_key.json
+*.key
+*.pem
+*.p12
+*.crt
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+service/gcp_key.json

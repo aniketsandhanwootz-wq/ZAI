@@ -2,6 +2,8 @@ import json
 import os
 from dataclasses import dataclass
 from typing import Optional
+import json
+from pathlib import Path
 
 
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> str:
@@ -57,7 +59,7 @@ def load_settings() -> Settings:
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
         spreadsheet_id=_get_env("GOOGLE_SHEET_ID", required=True),
-        google_service_account_json=_get_env("GOOGLE_SERVICE_ACCOUNT_JSON", required=True),
+        google_service_account_json=_get_env("GOOGLE_SERVICE_ACCOUNT_JSON", required=False) or _get_env("GOOGLE_SERVICE_ACCOUNT_FILE", required=True),
         appsheet_webhook_secret=_get_env("APPSHEET_WEBHOOK_SECRET", required=True),
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
@@ -72,10 +74,25 @@ def load_settings() -> Settings:
 
 
 def parse_service_account_info(raw: str) -> dict:
-    """
-    GOOGLE_SERVICE_ACCOUNT_JSON should be the full JSON key content as a string.
-    """
-    try:
+    raw = (raw or "").strip()
+    if not raw:
+        # try file
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE")
+
+    # If it's a file path
+    p = Path(raw)
+    if p.exists() and p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    # If it's JSON
+    if raw.startswith("{"):
         return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON must be valid JSON string.") from e
+
+    # If it's a relative path (like ./gcp_key.json) from service dir
+    service_dir = Path(__file__).resolve().parents[1]
+    p2 = (service_dir / raw).resolve()
+    if p2.exists() and p2.is_file():
+        return json.loads(p2.read_text(encoding="utf-8"))
+
+    raise RuntimeError("Invalid service account input. Use GOOGLE_SERVICE_ACCOUNT_FILE or GOOGLE_SERVICE_ACCOUNT_JSON.")
+

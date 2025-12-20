@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS incident_vectors (
   checkin_id TEXT NOT NULL,
 
   vector_type TEXT NOT NULL,                -- PROBLEM / RESOLUTION
-  embedding vector(1536) NOT NULL,
+  embedding vector(3072) NOT NULL,
 
   project_name TEXT,
   part_number TEXT,
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS ccp_vectors (
   chunk_text TEXT NOT NULL,
   source_ref TEXT,                          -- file/photo URL/path (pointer only)
 
-  embedding vector(1536) NOT NULL,
+  embedding vector(3072) NOT NULL,
 
   content_hash TEXT NOT NULL,               -- hash(chunk_text + ccp_id + chunk_type) for upserts
 
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS dashboard_vectors (
   legacy_id TEXT,
 
   update_message TEXT NOT NULL,
-  embedding vector(1536) NOT NULL,
+  embedding vector(3072) NOT NULL,
 
   content_hash TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()

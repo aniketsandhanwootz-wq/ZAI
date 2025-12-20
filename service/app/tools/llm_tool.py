@@ -1,12 +1,15 @@
+import os
 import requests
 from ..config import Settings
 
 
 class LLMTool:
     """
-    MVP: OpenAI-compatible chat endpoint.
-    Later: add Gemini/OpenAI SDK/local LLM.
+    Supports:
+      - openai_compat (existing)
+      - gemini (Google Generative Language API)
     """
+
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -14,9 +17,7 @@ class LLMTool:
         provider = self.settings.llm_provider
 
         if provider == "openai_compat":
-            base = (requests.utils.urlparse(
-                self._env("LLM_BASE_URL", "https://api.openai.com")
-            ).geturl()).rstrip("/")
+            base = os.getenv("LLM_BASE_URL", "https://api.openai.com").rstrip("/")
             url = f"{base}/v1/chat/completions"
             headers = {"Authorization": f"Bearer {self.settings.llm_api_key}"}
             payload = {
@@ -32,8 +33,33 @@ class LLMTool:
             data = r.json()
             return data["choices"][0]["message"]["content"].strip()
 
-        raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
+        if provider == "gemini":
+            base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
+            model = self.settings.llm_model or "gemini-1.5-flash"
+            key = self.settings.llm_api_key
 
-    def _env(self, name: str, default: str) -> str:
-        import os
-        return os.getenv(name, default)
+            url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+            payload = {
+                "systemInstruction": {
+                    "parts": [{"text": "You are a helpful manufacturing quality assistant."}]
+                },
+                "contents": [
+                    {"role": "user", "parts": [{"text": prompt}]}
+                ],
+                "generationConfig": {"temperature": 0.2},
+            }
+
+            r = requests.post(url, json=payload, timeout=120)
+            if not r.ok:
+                raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
+
+            data = r.json()
+            # pick first candidate text
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = "".join([p.get("text", "") for p in parts]).strip()
+            return text
+
+        raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
