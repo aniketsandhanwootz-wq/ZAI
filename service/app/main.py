@@ -18,8 +18,8 @@ from .pipeline.ingest.history_ingest import ingest_history
 from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 
-# Load .env from service/.env
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+# Load .env from service/.env (override shell env so local tests match)
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
 setup_logging()
 import logging
@@ -31,7 +31,9 @@ async def lifespan(app: FastAPI):
     settings = load_settings()
     app.state.settings = settings
     logger.info(
-        "startup: loaded settings. run_consumer=%s run_migrations=%s",
+        "startup: loaded settings. llm_provider=%s llm_model=%s run_consumer=%s run_migrations=%s",
+        settings.llm_provider,
+        settings.llm_model,
         settings.run_consumer,
         settings.run_migrations,
     )
@@ -88,6 +90,8 @@ def health(request: Request) -> dict:
     s = _get_settings(request)
     return {
         "ok": True,
+        "llm_provider": s.llm_provider,
+        "llm_model": s.llm_model,
         "run_consumer": s.run_consumer,
         "run_migrations": s.run_migrations,
     }
@@ -110,7 +114,7 @@ def appsheet_webhook(
 @app.post("/admin/trigger")
 def admin_trigger(request: Request, payload: WebhookPayload):
     settings = _get_settings(request)
-    result = run_event_graph(settings, payload.model_dump())
+    result = run_event_graph(settings, payload.model_dump(exclude_none=True))
     return {"ok": True, "result": result}
 
 

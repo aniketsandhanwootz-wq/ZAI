@@ -35,7 +35,7 @@ class LLMTool:
 
         if provider == "gemini":
             base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
-            model = self.settings.llm_model or "gemini-1.5-flash"
+            model = self.settings.llm_model or "gemini-2.5-flash"
             key = self.settings.llm_api_key
 
             url = f"{base}/v1beta/models/{model}:generateContent?key={key}"

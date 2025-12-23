@@ -27,10 +27,12 @@ class VectorTool:
     def _assert_dims(self, embedding: List[float]) -> None:
         expected = int(getattr(self.settings, "embedding_dims", 0) or 0)
         if expected and len(embedding) != expected:
-            raise RuntimeError(f"Embedding dims mismatch: expected {expected}, got {len(embedding)}. "
-                               f"Fix EMBEDDING_MODEL/EMBEDDING_DIMS or DB vector dims.")
+            raise RuntimeError(
+                f"Embedding dims mismatch: expected {expected}, got {len(embedding)}. "
+                f"Fix EMBEDDING_MODEL/EMBEDDING_DIMS or DB vector dims."
+            )
 
-    # ---------- INCIDENT ----------
+    # ---------- INCIDENT UPSERT ----------
     def upsert_incident_vector(
         self,
         tenant_id: str,
@@ -64,23 +66,35 @@ class VectorTool:
             with conn.cursor() as cur:
                 cur.execute(
                     sql,
-                    (tenant_id, checkin_id, vector_type, _vec_literal(embedding),
-                     project_name, part_number, legacy_id, status, text),
+                    (
+                        tenant_id,
+                        checkin_id,
+                        vector_type,
+                        _vec_literal(embedding),
+                        project_name,
+                        part_number,
+                        legacy_id,
+                        status,
+                        text,
+                    ),
                 )
 
+    # ---------- INCIDENT SEARCH (PROBLEM / RESOLUTION) ----------
     def search_incidents(
         self,
         tenant_id: str,
         query_embedding: List[float],
-        top_k: int = 5,
+        top_k: int = 10,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
+        vector_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         self._assert_dims(query_embedding)
 
         sql = """
         SELECT
           checkin_id,
+          vector_type,
           project_name,
           part_number,
           legacy_id,
@@ -92,9 +106,14 @@ class VectorTool:
         """
         params: List[Any] = [_vec_literal(query_embedding), tenant_id]
 
+        if vector_type:
+            sql += " AND vector_type = %s"
+            params.append(vector_type)
+
         if project_name:
             sql += " AND project_name = %s"
             params.append(project_name)
+
         if part_number:
             sql += " AND part_number = %s"
             params.append(part_number)
@@ -104,23 +123,28 @@ class VectorTool:
 
         with self._conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Improve recall for ivfflat
                 cur.execute("SET ivfflat.probes = 10;")
                 cur.execute(sql, params)
                 rows = cur.fetchall()
 
-        return [
-            {
-                "checkin_id": r["checkin_id"],
-                "summary": r["summary_text"],
-                "status": r["status"],
-                "project_name": r["project_name"],
-                "part_number": r["part_number"],
-                "distance": float(r["distance"]),
-            }
-            for r in rows
-        ]
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "checkin_id": r["checkin_id"],
+                    "vector_type": r["vector_type"],
+                    "summary": r["summary_text"],
+                    "status": r["status"],
+                    "project_name": r["project_name"],
+                    "part_number": r["part_number"],
+                    "legacy_id": r["legacy_id"],
+                    "distance": float(r["distance"]),
+                }
+            )
+        return out
 
-    # ---------- CCP ----------
+    # ---------- CCP UPSERT ----------
     def upsert_ccp_chunk(
         self,
         tenant_id: str,
@@ -157,15 +181,26 @@ class VectorTool:
             with conn.cursor() as cur:
                 cur.execute(
                     sql,
-                    (tenant_id, ccp_id, ccp_name, project_name, part_number, legacy_id,
-                     chunk_type, chunk_text, source_ref, _vec_literal(embedding), content_hash),
+                    (
+                        tenant_id,
+                        ccp_id,
+                        ccp_name,
+                        project_name,
+                        part_number,
+                        legacy_id,
+                        chunk_type,
+                        chunk_text,
+                        source_ref,
+                        _vec_literal(embedding),
+                        content_hash,
+                    ),
                 )
 
     def search_ccp_chunks(
         self,
         tenant_id: str,
         query_embedding: List[float],
-        top_k: int = 5,
+        top_k: int = 10,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -176,6 +211,7 @@ class VectorTool:
           ccp_id,
           ccp_name,
           chunk_text,
+          source_ref,
           (embedding <=> (%s)::vector) AS distance
         FROM ccp_vectors
         WHERE tenant_id = %s
@@ -203,6 +239,57 @@ class VectorTool:
                 "ccp_id": r["ccp_id"],
                 "ccp_name": r["ccp_name"],
                 "text": r["chunk_text"],
+                "source_ref": r["source_ref"],
+                "distance": float(r["distance"]),
+            }
+            for r in rows
+        ]
+
+    # ---------- DASHBOARD SEARCH ----------
+    def search_dashboard_updates(
+        self,
+        tenant_id: str,
+        query_embedding: List[float],
+        top_k: int = 8,
+        project_name: Optional[str] = None,
+        part_number: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        self._assert_dims(query_embedding)
+
+        sql = """
+        SELECT
+          project_name,
+          part_number,
+          legacy_id,
+          update_message,
+          (embedding <=> (%s)::vector) AS distance
+        FROM dashboard_vectors
+        WHERE tenant_id = %s
+        """
+        params: List[Any] = [_vec_literal(query_embedding), tenant_id]
+
+        if project_name:
+            sql += " AND project_name = %s"
+            params.append(project_name)
+        if part_number:
+            sql += " AND part_number = %s"
+            params.append(part_number)
+
+        sql += " ORDER BY distance ASC LIMIT %s"
+        params.append(top_k)
+
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SET ivfflat.probes = 10;")
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+
+        return [
+            {
+                "project_name": r["project_name"],
+                "part_number": r["part_number"],
+                "legacy_id": r["legacy_id"],
+                "update_message": r["update_message"],
                 "distance": float(r["distance"]),
             }
             for r in rows

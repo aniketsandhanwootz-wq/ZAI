@@ -1,4 +1,3 @@
-# service/app/pipeline/nodes/build_thread_snapshot.py
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -15,7 +14,6 @@ def build_thread_snapshot(settings, state: Dict[str, Any]) -> Dict[str, Any]:
     convos: List[Dict[str, Any]] = state.get("conversation_rows") or []
     recent_remarks: List[str] = []
     for r in convos[-10:]:
-        # Conversation keys are casefolded in SheetsTool
         remark = _norm_value(r.get("remarks", "")) or _norm_value(r.get("remark", ""))
         st = _norm_value(r.get("status", ""))
         if remark:
@@ -28,5 +26,5 @@ def build_thread_snapshot(settings, state: Dict[str, Any]) -> Dict[str, Any]:
     snapshot = f"{header}\n{body}\n{convo}".strip()
     state["thread_snapshot_text"] = snapshot
 
-    (state.get("logs") or []).append("Built thread snapshot")
+    (state.get("logs") or []).append("Built thread snapshot (problem-focused)")
     return state

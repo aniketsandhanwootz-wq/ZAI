@@ -1,4 +1,3 @@
-# service/app/pipeline/graph.py
 from __future__ import annotations
 
 import importlib
@@ -11,7 +10,6 @@ from .ingest.run_log import RunLog
 from ..logctx import run_id_var
 
 logger = logging.getLogger("zai.graph")
-
 
 State = Dict[str, Any]
 NodeFn = Callable[[Settings, State], State]
@@ -33,12 +31,14 @@ load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
 retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
+rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
 generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
 writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
 
 
 def _tenant_from_payload(payload: Dict[str, Any]) -> str:
-    return str(payload.get("meta", {}).get("tenant_id") or "")
+    rmeta = payload.get("meta") or {}
+    return str(rmeta.get("tenant_id") or "")
 
 
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -57,7 +57,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
 
     token = run_id_var.set(run_id)
 
-    # Standard dict state
     state: State = {
         "payload": payload,
         "run_id": run_id,
@@ -77,28 +76,39 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
     try:
         state = _timed("load_sheet_data", load_sheet_data)
 
-        # Update tenant in runlog if resolved
         tenant_id = str(state.get("tenant_id") or "").strip()
         if tenant_id and tenant_id != tenant_id_hint:
             runlog.update_tenant(run_id, tenant_id)
 
         state = _timed("build_thread_snapshot", build_thread_snapshot)
-
-        # Upsert + retrieval require tenant_id hard
         state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("retrieve_context", retrieve_context)
-
+        state = _timed("rerank_context", rerank_context)
         state = _timed("generate_ai_reply", generate_ai_reply)
         state = _timed("writeback", writeback)
 
         runlog.success(run_id)
         logger.info("SUCCESS primary_id=%s", primary_id)
-        return {"run_id": run_id, "ok": True, "primary_id": primary_id}
+
+        return {
+            "run_id": run_id,
+            "ok": True,
+            "primary_id": primary_id,
+            "ai_reply": state.get("ai_reply"),
+            "writeback_done": state.get("writeback_done"),
+            "logs": state.get("logs"),
+        }
 
     except Exception as e:
         runlog.error(run_id, str(e))
         logger.exception("ERROR: %s", e)
-        return {"run_id": run_id, "ok": False, "error": str(e), "primary_id": primary_id}
+        return {
+            "run_id": run_id,
+            "ok": False,
+            "error": str(e),
+            "primary_id": primary_id,
+            "logs": state.get("logs"),
+        }
 
     finally:
         run_id_var.reset(token)
