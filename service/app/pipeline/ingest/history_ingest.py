@@ -202,20 +202,42 @@ def ingest_history(settings: Settings, limit: int = 500) -> Dict[str, Any]:
                 text=snapshot,
             )
 
-            # Optional MVP: store RESOLUTION vector too for PASS/FAIL
-            if status.upper() in ("PASS", "FAIL"):
+            # Store RESOLUTION memory only when we have closure-like evidence in conversation.
+            # This avoids polluting RESOLUTION vectors with generic problem snapshots.
+            closure_lines: List[str] = []
+            for cc in convos[-25:]:
+                remark = _norm_value(cc.get(k_convo_remark, ""))
+                st = _norm_value(cc.get(k_convo_status, ""))
+                if not remark:
+                    continue
+                low = remark.lower()
+                if st.strip().upper() in ("PASS", "OK", "CLOSED", "DONE", "RESOLVED") or any(
+                    kw in low for kw in ("fixed", "resolved", "rework", "replaced", "offset", "tool", "fixture", "grind", "heat treat", "stress relieve", "measured", "cmm")
+                ):
+                    prefix = f"[{st}] " if st else ""
+                    closure_lines.append(f"{prefix}{remark}".strip())
+
+            # keep it tight
+            closure_lines = closure_lines[-8:]
+
+            if closure_lines:
+                resolution_text = (
+                    "CLOSURE SUMMARY (from conversation; factual):\n- "
+                    + "\n- ".join(closure_lines)
+                ).strip()
+
+                emb_r = embedder.embed_text(resolution_text)
                 vec.upsert_incident_vector(
                     tenant_id=tenant_id,
                     checkin_id=checkin_id,
                     vector_type="RESOLUTION",
-                    embedding=emb,
+                    embedding=emb_r,
                     project_name=project_name,
                     part_number=part_number,
                     legacy_id=legacy_id,
                     status=status,
-                    text=f"Resolution snapshot:\n{snapshot}",
+                    text=resolution_text,
                 )
-
             done += 1
 
         except Exception:

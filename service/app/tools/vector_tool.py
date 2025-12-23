@@ -195,7 +195,48 @@ class VectorTool:
                         content_hash,
                     ),
                 )
+    # ---------- DASHBOARD UPSERT ----------
+    def upsert_dashboard_update(
+        self,
+        tenant_id: str,
+        project_name: Optional[str],
+        part_number: Optional[str],
+        legacy_id: Optional[str],
+        update_message: str,
+        embedding: List[float],
+    ) -> None:
+        self._assert_dims(embedding)
+        msg = (update_message or "").strip()
+        if not msg:
+            return
 
+        # content_hash changes if message changes => incremental ingestion
+        content_hash = _sha256(f"{legacy_id}|{project_name}|{part_number}|{msg}")
+
+        sql = """
+        INSERT INTO dashboard_vectors
+          (tenant_id, project_name, part_number, legacy_id, update_message, embedding, content_hash)
+        VALUES
+          (%s, %s, %s, %s, %s, (%s)::vector, %s)
+        ON CONFLICT (tenant_id, content_hash)
+        DO NOTHING;
+        """
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql,
+                    (
+                        tenant_id,
+                        project_name,
+                        part_number,
+                        legacy_id,
+                        msg,
+                        _vec_literal(embedding),
+                        content_hash,
+                    ),
+                )
+    # ---------- CCP SEARCH ----------
     def search_ccp_chunks(
         self,
         tenant_id: str,

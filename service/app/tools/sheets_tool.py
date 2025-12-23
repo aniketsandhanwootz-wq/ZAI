@@ -168,6 +168,15 @@ class SheetsTool:
 
     # ---------- Domain readers ----------
 
+    def list_dashboard_updates(self) -> List[Dict[str, Any]]:
+        """
+        Returns all rows from Dashboard Updates tab as dicts keyed by casefold headers.
+        """
+        t = self._table("dashboard_update")
+        if not t["headers"]:
+            return []
+        return [self._row_to_dict(t, r) for r in t["rows"]]
+
     def get_checkin_by_id(self, checkin_id: str) -> Optional[Dict[str, Any]]:
         t = self._table("checkin")
         if not t["headers"]:
