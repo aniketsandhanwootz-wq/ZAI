@@ -23,3 +23,5 @@ langgraph==0.2.53
 
 pyyaml==6.0.2
 pypdf==5.1.0
+
+Pillow==10.4.0

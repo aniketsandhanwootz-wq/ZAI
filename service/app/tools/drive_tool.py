@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
-import base64
+from io import BytesIO
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseUpload
 
 from ..config import Settings, parse_service_account_info
 
 
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+# NOTE: need upload + permissions => not readonly
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
 @dataclass
@@ -24,9 +26,11 @@ class DriveItem:
 
 class DriveTool:
     """
-    Minimal Drive read-only helper:
+    Drive helper:
       - resolve a relative path under a root folder
       - download file bytes
+      - upload bytes to a subfolder path
+      - (optional) make public + return webViewLink
     """
 
     def __init__(self, settings: Settings):
@@ -36,9 +40,9 @@ class DriveTool:
 
         self.root_folder_id = (getattr(settings, "google_drive_root_folder_id", "") or "").strip()
 
-        # small caches
-        self._folder_cache: Dict[tuple[str, str], Optional[str]] = {}  # (parent_id, folder_name) -> folder_id
-        self._file_cache: Dict[tuple[str, str], Optional[DriveItem]] = {}  # (parent_id, file_name) -> DriveItem
+        # caches
+        self._folder_cache: Dict[tuple[str, str], Optional[str]] = {}
+        self._file_cache: Dict[tuple[str, str], Optional[DriveItem]] = {}
 
     def _list_by_query(self, q: str, fields: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -78,15 +82,33 @@ class DriveTool:
         self._folder_cache[key] = folder_id
         return folder_id
 
+    def _create_folder(self, parent_id: str, folder_name: str) -> str:
+        body = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        }
+        resp = (
+            self._svc.files()
+            .create(body=body, fields="id", supportsAllDrives=True)
+            .execute()
+        )
+        fid = resp["id"]
+        self._folder_cache[(parent_id, folder_name)] = fid
+        return fid
+
+    def _ensure_folder(self, parent_id: str, folder_name: str) -> str:
+        fid = self._find_folder_id(parent_id, folder_name)
+        if fid:
+            return fid
+        return self._create_folder(parent_id, folder_name)
+
     def _find_file_in_folder(self, parent_id: str, file_name: str) -> Optional[DriveItem]:
         key = (parent_id, file_name)
         if key in self._file_cache:
             return self._file_cache[key]
 
-        q = (
-            f"'{parent_id}' in parents and "
-            f"name='{file_name}' and trashed=false"
-        )
+        q = f"'{parent_id}' in parents and name='{file_name}' and trashed=false"
         items = self._list_by_query(q, fields="id,name,mimeType,parents")
         if not items:
             self._file_cache[key] = None
@@ -103,12 +125,6 @@ class DriveTool:
         return item
 
     def resolve_path(self, rel_path: str, *, root_folder_id: Optional[str] = None) -> Optional[DriveItem]:
-        """
-        rel_path examples:
-          CCP_Files_/220/Files.1009.pdf
-          CheckIn_Images/abc.jpg
-          Conversation_Images/xyz.png
-        """
         root = (root_folder_id or self.root_folder_id or "").strip()
         if not root:
             return None
@@ -122,24 +138,79 @@ class DriveTool:
             return None
 
         parent_id = root
-
-        # walk folders
         for folder in parts[:-1]:
             fid = self._find_folder_id(parent_id, folder)
             if not fid:
                 return None
             parent_id = fid
 
-        # final is file name
         filename = parts[-1]
         return self._find_file_in_folder(parent_id, filename)
 
     def download_file_bytes(self, file_id: str) -> Optional[bytes]:
         try:
             req = self._svc.files().get_media(fileId=file_id, supportsAllDrives=True)
-            data = req.execute()
-            return data
+            return req.execute()
         except HttpError:
             return None
         except Exception:
             return None
+
+    def _make_public(self, file_id: str) -> None:
+        body = {"type": "anyone", "role": "reader"}
+        self._svc.permissions().create(
+            fileId=file_id,
+            body=body,
+            supportsAllDrives=True,
+        ).execute()
+
+    def upload_bytes_to_subpath(
+        self,
+        *,
+        folder_parts: List[str],
+        file_name: str,
+        content_bytes: bytes,
+        mime_type: str,
+        make_public: bool = True,
+    ) -> Dict[str, str]:
+        root = (self.root_folder_id or "").strip()
+        if not root:
+            raise RuntimeError("GOOGLE_DRIVE_ROOT_FOLDER_ID is not set")
+
+        parent_id = root
+        for f in folder_parts or []:
+            parent_id = self._ensure_folder(parent_id, f)
+
+        media = MediaIoBaseUpload(BytesIO(content_bytes), mimetype=mime_type, resumable=False)
+        body = {"name": file_name, "parents": [parent_id]}
+
+        resp = (
+            self._svc.files()
+            .create(
+                body=body,
+                media_body=media,
+                fields="id,webViewLink,webContentLink",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        fid = resp["id"]
+
+        if make_public:
+            try:
+                self._make_public(fid)
+                # refresh links
+                resp2 = (
+                    self._svc.files()
+                    .get(fileId=fid, fields="id,webViewLink,webContentLink", supportsAllDrives=True)
+                    .execute()
+                )
+                resp.update(resp2)
+            except Exception:
+                pass
+
+        return {
+            "file_id": fid,
+            "webViewLink": resp.get("webViewLink", ""),
+            "webContentLink": resp.get("webContentLink", ""),
+        }

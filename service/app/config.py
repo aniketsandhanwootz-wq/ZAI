@@ -21,8 +21,16 @@ class Settings:
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
-    google_drive_root_folder_id: str  # Drive folder that contains CCP_Files_/CheckIn_Images/Conversation_Images etc
+     # Drive
+    google_drive_root_folder_id: str
 
+    # Vision (image caption + boxes)
+    vision_provider: str
+    vision_api_key: str
+    vision_model: str
+
+    # Teams
+    teams_webhook_url: str
     # Webhook security
     appsheet_webhook_secret: str
 
@@ -69,6 +77,16 @@ def load_settings() -> Settings:
     run_migrations = _get_env("RUN_MIGRATIONS", "0").lower() in ("1", "true", "yes")
 
     # -----------------------
+    # Drive + Vision + Teams
+    # -----------------------
+    google_drive_root_folder_id = _get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
+
+    vision_provider = _get_env("VISION_PROVIDER", "gemini")
+    vision_api_key = _get_env("VISION_API_KEY", llm_api_key)
+    vision_model = _get_env("VISION_MODEL", "gemini-2.0-flash")
+
+    teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
+    # -----------------------
     # Sheets auth (FIXED)
     # -----------------------
     # IMPORTANT:
@@ -96,8 +114,11 @@ def load_settings() -> Settings:
         run_consumer=run_consumer,
         consumer_queues=consumer_queues,
         run_migrations=run_migrations,
-        google_drive_root_folder_id=_get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", ""),
-
+        google_drive_root_folder_id=google_drive_root_folder_id,
+        vision_provider=vision_provider,
+        vision_api_key=vision_api_key,
+        vision_model=vision_model,
+        teams_webhook_url=teams_webhook_url,
     )
 
 

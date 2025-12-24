@@ -4,7 +4,8 @@ import uuid
 from pathlib import Path
 from typing import Optional, Literal, Dict, Any
 from contextlib import asynccontextmanager
-
+from .schemas.webhook import WebhookPayload
+from .routers import appsheet_webhook_router, teams_test_router
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -49,6 +50,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Wootz Checkin AI (MVP)", lifespan=lifespan)
 
+app.include_router(appsheet_webhook_router)
+app.include_router(teams_test_router)
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
@@ -98,18 +101,17 @@ def health(request: Request) -> dict:
 
 
 @app.post("/webhook/appsheet")
-def appsheet_webhook(
+def appsheet_webhook_legacy(
     request: Request,
     payload: WebhookPayload,
     x_appsheet_secret: Optional[str] = Header(default=None),
 ):
+    # forward to new router logic by reusing same enqueue/secret check
     settings = _get_settings(request)
     if x_appsheet_secret != settings.appsheet_webhook_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
     job_id = enqueue_job(settings, payload.model_dump())
-    return {"ok": True, "job_id": job_id}
-
+    return {"ok": True, "job_id": job_id, "note": "legacy path; prefer /webhooks/appsheet"}
 
 @app.post("/admin/trigger")
 def admin_trigger(request: Request, payload: WebhookPayload):

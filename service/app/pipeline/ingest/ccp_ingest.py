@@ -12,7 +12,7 @@ from ...tools.llm_tool import LLMTool
 from ...tools.vector_tool import VectorTool
 from ...tools.drive_tool import DriveTool
 from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
-from .utils import chunk_text
+from . import utils as ingest_utils
 
 
 def _extract_pdf_text_from_bytes(data: bytes) -> str:
@@ -151,7 +151,7 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
 
         # 1) CCP description chunks (incremental via content_hash)
         if desc:
-            chunks = chunk_text(f"CCP: {ccp_name}\n{desc}")
+            chunks = ingest_utils.chunk_text(f"CCP: {ccp_name}\n{desc}")
             for ch in chunks:
                 content_hash = None  # VectorTool will compute if None
                 # pre-check by hash requires same hash logic -> we keep it simple:
@@ -214,7 +214,7 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
                 if not text:
                     continue
 
-                for ch in chunk_text(text):
+                for ch in ingest_utils.chunk_text(text):
                     import hashlib
                     content_hash = hashlib.sha256(f"{ccp_id}|PDF_TEXT|{ch}".encode("utf-8")).hexdigest()
                     if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="PDF_TEXT", content_hash=content_hash):
