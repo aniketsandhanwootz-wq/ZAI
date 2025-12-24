@@ -244,7 +244,7 @@ class VectorTool:
         """
         qv = _vec_str(query_embedding)
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            cur.execute(sql, [qv, *args, qv, int(top_k)])
             rows = cur.fetchall() or []
             out = []
             for r in rows:
@@ -293,7 +293,7 @@ class VectorTool:
         """
         qv = _vec_str(query_embedding)
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            cur.execute(sql, [qv, *args, qv, int(top_k)])
             rows = cur.fetchall() or []
             return [
                 {
@@ -341,7 +341,7 @@ class VectorTool:
         """
         qv = _vec_str(query_embedding)
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            cur.execute(sql, [qv, *args, qv, int(top_k)])
             rows = cur.fetchall() or []
             return [
                 {
