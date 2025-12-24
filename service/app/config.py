@@ -21,6 +21,7 @@ class Settings:
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
+    google_drive_root_folder_id: str  # Drive folder that contains CCP_Files_/CheckIn_Images/Conversation_Images etc
 
     # Webhook security
     appsheet_webhook_secret: str
@@ -95,6 +96,8 @@ def load_settings() -> Settings:
         run_consumer=run_consumer,
         consumer_queues=consumer_queues,
         run_migrations=run_migrations,
+        google_drive_root_folder_id=_get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", ""),
+
     )
 
 

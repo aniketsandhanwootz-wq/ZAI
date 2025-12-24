@@ -188,6 +188,11 @@ def ingest_history(settings: Settings, limit: int = 500) -> Dict[str, Any]:
         )
 
         try:
+            # incremental skip: if snapshot text unchanged, don't re-embed
+            prev = vec.get_incident_summary_text(tenant_id=tenant_id, checkin_id=checkin_id, vector_type="PROBLEM")
+            if prev and prev.strip() == snapshot.strip():
+                done += 1
+                continue
             emb = embedder.embed_text(snapshot)
 
             vec.upsert_incident_vector(

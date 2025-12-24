@@ -2,19 +2,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 import hashlib
-
 import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2.extras
 
 from ..config import Settings
 
 
-def _vec_literal(v: List[float]) -> str:
-    return "[" + ",".join(f"{x:.8f}" for x in v) + "]"
+def _vec_str(v: List[float]) -> str:
+    # pgvector literal
+    return "[" + ",".join(f"{float(x):.8f}" for x in v) + "]"
 
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _sha256(s: str) -> str:
+    return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
 
 
 class VectorTool:
@@ -24,314 +24,332 @@ class VectorTool:
     def _conn(self):
         return psycopg2.connect(self.settings.database_url)
 
-    def _assert_dims(self, embedding: List[float]) -> None:
-        expected = int(getattr(self.settings, "embedding_dims", 0) or 0)
-        if expected and len(embedding) != expected:
-            raise RuntimeError(
-                f"Embedding dims mismatch: expected {expected}, got {len(embedding)}. "
-                f"Fix EMBEDDING_MODEL/EMBEDDING_DIMS or DB vector dims."
-            )
+    # ---------------------------
+    # Existence checks (incremental)
+    # ---------------------------
 
-    # ---------- INCIDENT UPSERT ----------
+    def ccp_hash_exists(self, *, tenant_id: str, ccp_id: str, chunk_type: str, content_hash: str) -> bool:
+        sql = """
+        SELECT 1
+        FROM ccp_vectors
+        WHERE tenant_id=%s AND ccp_id=%s AND chunk_type=%s AND content_hash=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, ccp_id, chunk_type, content_hash))
+            return cur.fetchone() is not None
+
+    def dashboard_hash_exists(self, *, tenant_id: str, content_hash: str) -> bool:
+        sql = """
+        SELECT 1
+        FROM dashboard_vectors
+        WHERE tenant_id=%s AND content_hash=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, content_hash))
+            return cur.fetchone() is not None
+
+    def get_incident_summary_text(self, *, tenant_id: str, checkin_id: str, vector_type: str) -> Optional[str]:
+        sql = """
+        SELECT summary_text
+        FROM incident_vectors
+        WHERE tenant_id=%s AND checkin_id=%s AND vector_type=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, checkin_id, vector_type))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    # ---------------------------
+    # Upserts
+    # ---------------------------
+
     def upsert_incident_vector(
         self,
+        *,
         tenant_id: str,
         checkin_id: str,
         vector_type: str,
         embedding: List[float],
-        project_name: Optional[str],
-        part_number: Optional[str],
-        legacy_id: Optional[str],
-        status: Optional[str],
+        project_name: str,
+        part_number: str,
+        legacy_id: str,
+        status: str,
         text: str,
     ) -> None:
-        self._assert_dims(embedding)
-
         sql = """
-        INSERT INTO incident_vectors
-          (tenant_id, checkin_id, vector_type, embedding, project_name, part_number, legacy_id, status, summary_text)
-        VALUES
-          (%s, %s, %s, (%s)::vector, %s, %s, %s, %s, %s)
+        INSERT INTO incident_vectors (
+          tenant_id, checkin_id, vector_type, embedding,
+          project_name, part_number, legacy_id,
+          status, summary_text, updated_at
+        )
+        VALUES (%s,%s,%s,%s::vector,%s,%s,%s,%s,%s, now())
         ON CONFLICT (tenant_id, checkin_id, vector_type)
         DO UPDATE SET
-          embedding = EXCLUDED.embedding,
-          project_name = EXCLUDED.project_name,
-          part_number = EXCLUDED.part_number,
-          legacy_id = EXCLUDED.legacy_id,
-          status = EXCLUDED.status,
-          summary_text = EXCLUDED.summary_text,
-          updated_at = now();
+          embedding=EXCLUDED.embedding,
+          project_name=EXCLUDED.project_name,
+          part_number=EXCLUDED.part_number,
+          legacy_id=EXCLUDED.legacy_id,
+          status=EXCLUDED.status,
+          summary_text=EXCLUDED.summary_text,
+          updated_at=now()
         """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql,
-                    (
-                        tenant_id,
-                        checkin_id,
-                        vector_type,
-                        _vec_literal(embedding),
-                        project_name,
-                        part_number,
-                        legacy_id,
-                        status,
-                        text,
-                    ),
-                )
-
-    # ---------- INCIDENT SEARCH (PROBLEM / RESOLUTION) ----------
-    def search_incidents(
-        self,
-        tenant_id: str,
-        query_embedding: List[float],
-        top_k: int = 10,
-        project_name: Optional[str] = None,
-        part_number: Optional[str] = None,
-        vector_type: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        self._assert_dims(query_embedding)
-
-        sql = """
-        SELECT
-          checkin_id,
-          vector_type,
-          project_name,
-          part_number,
-          legacy_id,
-          status,
-          summary_text,
-          (embedding <=> (%s)::vector) AS distance
-        FROM incident_vectors
-        WHERE tenant_id = %s
-        """
-        params: List[Any] = [_vec_literal(query_embedding), tenant_id]
-
-        if vector_type:
-            sql += " AND vector_type = %s"
-            params.append(vector_type)
-
-        if project_name:
-            sql += " AND project_name = %s"
-            params.append(project_name)
-
-        if part_number:
-            sql += " AND part_number = %s"
-            params.append(part_number)
-
-        sql += " ORDER BY distance ASC LIMIT %s"
-        params.append(top_k)
-
-        with self._conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Improve recall for ivfflat
-                cur.execute("SET ivfflat.probes = 10;")
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            out.append(
-                {
-                    "checkin_id": r["checkin_id"],
-                    "vector_type": r["vector_type"],
-                    "summary": r["summary_text"],
-                    "status": r["status"],
-                    "project_name": r["project_name"],
-                    "part_number": r["part_number"],
-                    "legacy_id": r["legacy_id"],
-                    "distance": float(r["distance"]),
-                }
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    tenant_id,
+                    checkin_id,
+                    vector_type,
+                    _vec_str(embedding),
+                    project_name or None,
+                    part_number or None,
+                    legacy_id or None,
+                    status or None,
+                    text or "",
+                ),
             )
-        return out
 
-    # ---------- CCP UPSERT ----------
     def upsert_ccp_chunk(
         self,
+        *,
         tenant_id: str,
         ccp_id: str,
-        ccp_name: Optional[str],
-        project_name: Optional[str],
-        part_number: Optional[str],
-        legacy_id: Optional[str],
+        ccp_name: str,
+        project_name: str,
+        part_number: str,
+        legacy_id: str,
         chunk_type: str,
         chunk_text: str,
-        source_ref: Optional[str],
+        source_ref: str,
         embedding: List[float],
+        content_hash: Optional[str] = None,
     ) -> None:
-        self._assert_dims(embedding)
-        content_hash = _sha256(f"{ccp_id}|{chunk_type}|{chunk_text}")
+        h = content_hash or _sha256(f"{ccp_id}|{chunk_type}|{chunk_text}")
 
         sql = """
-        INSERT INTO ccp_vectors
-          (tenant_id, ccp_id, ccp_name, project_name, part_number, legacy_id,
-           chunk_type, chunk_text, source_ref, embedding, content_hash)
-        VALUES
-          (%s,%s,%s,%s,%s,%s,%s,%s,%s,(%s)::vector,%s)
+        INSERT INTO ccp_vectors (
+          tenant_id,
+          ccp_id, ccp_name,
+          project_name, part_number, legacy_id,
+          chunk_type, chunk_text, source_ref,
+          embedding,
+          content_hash,
+          updated_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s, now())
         ON CONFLICT (tenant_id, ccp_id, chunk_type, content_hash)
         DO UPDATE SET
-          ccp_name = EXCLUDED.ccp_name,
-          project_name = EXCLUDED.project_name,
-          part_number = EXCLUDED.part_number,
-          legacy_id = EXCLUDED.legacy_id,
-          source_ref = EXCLUDED.source_ref,
-          embedding = EXCLUDED.embedding,
-          updated_at = now();
+          ccp_name=EXCLUDED.ccp_name,
+          project_name=EXCLUDED.project_name,
+          part_number=EXCLUDED.part_number,
+          legacy_id=EXCLUDED.legacy_id,
+          chunk_text=EXCLUDED.chunk_text,
+          source_ref=EXCLUDED.source_ref,
+          embedding=EXCLUDED.embedding,
+          updated_at=now()
         """
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql,
-                    (
-                        tenant_id,
-                        ccp_id,
-                        ccp_name,
-                        project_name,
-                        part_number,
-                        legacy_id,
-                        chunk_type,
-                        chunk_text,
-                        source_ref,
-                        _vec_literal(embedding),
-                        content_hash,
-                    ),
-                )
-    # ---------- DASHBOARD UPSERT ----------
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    tenant_id,
+                    ccp_id,
+                    ccp_name or None,
+                    project_name or None,
+                    part_number or None,
+                    legacy_id or None,
+                    chunk_type,
+                    chunk_text,
+                    source_ref or "",
+                    _vec_str(embedding),
+                    h,
+                ),
+            )
+
     def upsert_dashboard_update(
         self,
+        *,
         tenant_id: str,
         project_name: Optional[str],
         part_number: Optional[str],
         legacy_id: Optional[str],
         update_message: str,
         embedding: List[float],
+        content_hash: Optional[str] = None,
     ) -> None:
-        self._assert_dims(embedding)
-        msg = (update_message or "").strip()
-        if not msg:
-            return
-
-        # content_hash changes if message changes => incremental ingestion
-        content_hash = _sha256(f"{legacy_id}|{project_name}|{part_number}|{msg}")
+        # hash should be stable on message+project scope
+        h = content_hash or _sha256(f"{tenant_id}|{legacy_id or ''}|{project_name or ''}|{part_number or ''}|{update_message}")
 
         sql = """
-        INSERT INTO dashboard_vectors
-          (tenant_id, project_name, part_number, legacy_id, update_message, embedding, content_hash)
-        VALUES
-          (%s, %s, %s, %s, %s, (%s)::vector, %s)
+        INSERT INTO dashboard_vectors (
+          tenant_id, project_name, part_number, legacy_id,
+          update_message, embedding, content_hash
+        )
+        VALUES (%s,%s,%s,%s,%s,%s::vector,%s)
         ON CONFLICT (tenant_id, content_hash)
-        DO NOTHING;
+        DO NOTHING
         """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (tenant_id, project_name, part_number, legacy_id, update_message, _vec_str(embedding), h),
+            )
 
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql,
-                    (
-                        tenant_id,
-                        project_name,
-                        part_number,
-                        legacy_id,
-                        msg,
-                        _vec_literal(embedding),
-                        content_hash,
-                    ),
-                )
-    # ---------- CCP SEARCH ----------
-    def search_ccp_chunks(
+    # ---------------------------
+    # Search (pgvector cosine distance)
+    # ---------------------------
+
+    def search_incidents(
         self,
+        *,
         tenant_id: str,
         query_embedding: List[float],
-        top_k: int = 10,
+        top_k: int = 30,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
+        vector_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        self._assert_dims(query_embedding)
+        where = ["tenant_id=%s"]
+        args: List[Any] = [tenant_id]
 
-        sql = """
-        SELECT
-          ccp_id,
-          ccp_name,
-          chunk_text,
-          source_ref,
-          (embedding <=> (%s)::vector) AS distance
-        FROM ccp_vectors
-        WHERE tenant_id = %s
-        """
-        params: List[Any] = [_vec_literal(query_embedding), tenant_id]
+        if vector_type:
+            where.append("vector_type=%s")
+            args.append(vector_type)
 
         if project_name:
-            sql += " AND project_name = %s"
-            params.append(project_name)
+            where.append("project_name=%s")
+            args.append(project_name)
+
         if part_number:
-            sql += " AND part_number = %s"
-            params.append(part_number)
+            where.append("part_number=%s")
+            args.append(part_number)
 
-        sql += " ORDER BY distance ASC LIMIT %s"
-        params.append(top_k)
-
-        with self._conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SET ivfflat.probes = 10;")
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-
-        return [
-            {
-                "ccp_id": r["ccp_id"],
-                "ccp_name": r["ccp_name"],
-                "text": r["chunk_text"],
-                "source_ref": r["source_ref"],
-                "distance": float(r["distance"]),
-            }
-            for r in rows
-        ]
-
-    # ---------- DASHBOARD SEARCH ----------
-    def search_dashboard_updates(
-        self,
-        tenant_id: str,
-        query_embedding: List[float],
-        top_k: int = 8,
-        project_name: Optional[str] = None,
-        part_number: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        self._assert_dims(query_embedding)
-
-        sql = """
+        sql = f"""
         SELECT
+          checkin_id,
+          vector_type,
+          summary_text,
           project_name,
           part_number,
           legacy_id,
-          update_message,
-          (embedding <=> (%s)::vector) AS distance
-        FROM dashboard_vectors
-        WHERE tenant_id = %s
+          status,
+          (embedding <=> %s::vector) AS distance
+        FROM incident_vectors
+        WHERE {" AND ".join(where)}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
         """
-        params: List[Any] = [_vec_literal(query_embedding), tenant_id]
+        qv = _vec_str(query_embedding)
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            rows = cur.fetchall() or []
+            out = []
+            for r in rows:
+                out.append(
+                    {
+                        "checkin_id": r["checkin_id"],
+                        "vector_type": r["vector_type"],
+                        "summary": r["summary_text"],
+                        "project_name": r["project_name"],
+                        "part_number": r["part_number"],
+                        "legacy_id": r["legacy_id"],
+                        "status": r["status"],
+                        "distance": float(r["distance"]),
+                    }
+                )
+            return out
+
+    def search_ccp_chunks(
+        self,
+        *,
+        tenant_id: str,
+        query_embedding: List[float],
+        top_k: int = 30,
+        project_name: Optional[str] = None,
+        part_number: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        where = ["tenant_id=%s"]
+        args: List[Any] = [tenant_id]
 
         if project_name:
-            sql += " AND project_name = %s"
-            params.append(project_name)
+            where.append("(project_name=%s OR project_name IS NULL)")
+            args.append(project_name)
+
         if part_number:
-            sql += " AND part_number = %s"
-            params.append(part_number)
+            where.append("(part_number=%s OR part_number IS NULL)")
+            args.append(part_number)
 
-        sql += " ORDER BY distance ASC LIMIT %s"
-        params.append(top_k)
+        sql = f"""
+        SELECT
+          ccp_id, ccp_name, chunk_type, chunk_text, source_ref,
+          (embedding <=> %s::vector) AS distance
+        FROM ccp_vectors
+        WHERE {" AND ".join(where)}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """
+        qv = _vec_str(query_embedding)
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "ccp_id": r["ccp_id"],
+                    "ccp_name": r["ccp_name"],
+                    "chunk_type": r["chunk_type"],
+                    "text": r["chunk_text"],
+                    "source_ref": r["source_ref"],
+                    "distance": float(r["distance"]),
+                }
+                for r in rows
+            ]
 
-        with self._conn() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SET ivfflat.probes = 10;")
-                cur.execute(sql, params)
-                rows = cur.fetchall()
+    def search_dashboard_updates(
+        self,
+        *,
+        tenant_id: str,
+        query_embedding: List[float],
+        top_k: int = 20,
+        project_name: Optional[str] = None,
+        part_number: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        where = ["tenant_id=%s"]
+        args: List[Any] = [tenant_id]
 
-        return [
-            {
-                "project_name": r["project_name"],
-                "part_number": r["part_number"],
-                "legacy_id": r["legacy_id"],
-                "update_message": r["update_message"],
-                "distance": float(r["distance"]),
-            }
-            for r in rows
-        ]
+        if project_name:
+            where.append("(project_name=%s OR project_name IS NULL)")
+            args.append(project_name)
+
+        if part_number:
+            where.append("(part_number=%s OR part_number IS NULL)")
+            args.append(part_number)
+
+        sql = f"""
+        SELECT
+          update_message,
+          project_name,
+          part_number,
+          legacy_id,
+          (embedding <=> %s::vector) AS distance
+        FROM dashboard_vectors
+        WHERE {" AND ".join(where)}
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """
+        qv = _vec_str(query_embedding)
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, [*args, qv, qv, int(top_k)])
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "update_message": r["update_message"],
+                    "project_name": r["project_name"],
+                    "part_number": r["part_number"],
+                    "legacy_id": r["legacy_id"],
+                    "distance": float(r["distance"]),
+                }
+                for r in rows
+            ]
