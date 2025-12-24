@@ -53,7 +53,8 @@ class AnnotateTool:
                     pass
 
             # label background
-            tw, th = draw.textsize(tag, font=font)
+            bbox = draw.textbbox((0, 0), tag, font=font)
+            tw, th = (bbox[2] - bbox[0]), (bbox[3] - bbox[1])
             pad = 3
             bx1, by1 = X1, max(0, Y1 - th - 2 * pad)
             bx2, by2 = X1 + tw + 2 * pad, Y1

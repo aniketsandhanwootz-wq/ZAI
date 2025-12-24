@@ -39,6 +39,9 @@ class DriveTool:
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
 
         self.root_folder_id = (getattr(settings, "google_drive_root_folder_id", "") or "").strip()
+        self.annotated_root_folder_id = (
+            getattr(settings, "google_drive_annotated_folder_id", "") or ""
+        ).strip()
 
         # caches
         self._folder_cache: Dict[tuple[str, str], Optional[str]] = {}
@@ -172,10 +175,11 @@ class DriveTool:
         content_bytes: bytes,
         mime_type: str,
         make_public: bool = True,
+        root_folder_id: Optional[str] = None,
     ) -> Dict[str, str]:
-        root = (self.root_folder_id or "").strip()
+        root = (root_folder_id or self.root_folder_id or "").strip()
         if not root:
-            raise RuntimeError("GOOGLE_DRIVE_ROOT_FOLDER_ID is not set")
+            raise RuntimeError("Drive upload root folder id is not set")
 
         parent_id = root
         for f in folder_parts or []:
@@ -214,3 +218,25 @@ class DriveTool:
             "webViewLink": resp.get("webViewLink", ""),
             "webContentLink": resp.get("webContentLink", ""),
         }
+
+    def upload_annotated_bytes(
+        self,
+        *,
+        checkin_id: str,
+        file_name: str,
+        content_bytes: bytes,
+        mime_type: str = "image/png",
+        make_public: bool = True,
+    ) -> Dict[str, str]:
+        root = (self.annotated_root_folder_id or "").strip()
+        if not root:
+            raise RuntimeError("GOOGLE_DRIVE_ANNOTATED_FOLDER_ID is not set")
+
+        return self.upload_bytes_to_subpath(
+            folder_parts=["Annotated", str(checkin_id)],
+            file_name=file_name,
+            content_bytes=content_bytes,
+            mime_type=mime_type,
+            make_public=make_public,
+            root_folder_id=root,
+        )

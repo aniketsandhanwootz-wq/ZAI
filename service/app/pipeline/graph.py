@@ -34,7 +34,7 @@ retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_n
 rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
 generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
 writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
-
+analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
 
 def _tenant_from_payload(payload: Dict[str, Any]) -> str:
     rmeta = payload.get("meta") or {}
@@ -81,6 +81,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             runlog.update_tenant(run_id, tenant_id)
 
         state = _timed("build_thread_snapshot", build_thread_snapshot)
+        state = _timed("analyze_media", analyze_media)
         state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("retrieve_context", retrieve_context)
         state = _timed("rerank_context", rerank_context)

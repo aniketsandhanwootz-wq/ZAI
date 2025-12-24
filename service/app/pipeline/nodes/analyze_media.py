@@ -89,7 +89,13 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         source_hash = _sha256(data)
 
         # idempotency: already annotated?
+        # idempotency: already processed? (caption or annotated)
         if db.artifact_exists(
+            tenant_id=tenant_id,
+            checkin_id=checkin_id,
+            artifact_type="IMAGE_CAPTION",
+            source_hash=source_hash,
+        ) or db.artifact_exists(
             tenant_id=tenant_id,
             checkin_id=checkin_id,
             artifact_type="ANNOTATED_IMAGE",
@@ -102,20 +108,38 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         mime = (att.mime_type or "").strip() or "image/jpeg"
 
         # 1) vision → caption + boxes
-        out = vision.analyze_defects(image_bytes=data, mime_type=mime, context_hint=context_hint)
-        caption = str(out.get("caption") or "").strip()
-        defects = out.get("defects") or []
+        # 1) caption (for retrieval/embedding)
+        caption = vision.caption_for_retrieval(
+            image_bytes=data,
+            mime_type=mime,
+            context_hint=context_hint,
+        ).strip()
+
+        # 2) defects (for boxes/annotation)
+        dout = vision.detect_defects(
+            image_bytes=data,
+            mime_type=mime,
+            context_hint=context_hint,
+        )
+        defects = dout.get("defects") or []
         if not isinstance(defects, list):
             defects = []
 
         # 2) annotate
+        # 2) annotate+upload ONLY if defects exist
+        if not defects:
+            # still keep caption for retrieval notes; skip upload
+            if caption:
+                media_notes.append(f"- Image: {caption} | defects: none obvious")
+            continue
+
         annotated = annot.draw(data, defects)
 
         # 3) upload to Drive: Annotated/<checkin_id>/...
         fname = f"{source_hash[:10]}_{(att.name or 'image').replace(' ', '_')}.png"
         folder_parts = ["Annotated", checkin_id]
-        up = drive.upload_bytes_to_subpath(
-            folder_parts=folder_parts,
+        up = drive.upload_annotated_bytes(
+            checkin_id=checkin_id,
             file_name=fname,
             content_bytes=annotated,
             mime_type="image/png",

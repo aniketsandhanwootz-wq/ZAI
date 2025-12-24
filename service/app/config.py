@@ -21,9 +21,10 @@ class Settings:
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
-     # Drive
-    google_drive_root_folder_id: str
 
+    # Drive
+    google_drive_root_folder_id: str
+    google_drive_annotated_folder_id: str
     # Vision (image caption + boxes)
     vision_provider: str
     vision_api_key: str
@@ -80,6 +81,7 @@ def load_settings() -> Settings:
     # Drive + Vision + Teams
     # -----------------------
     google_drive_root_folder_id = _get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
+    google_drive_annotated_folder_id = _get_env("GOOGLE_DRIVE_ANNOTATED_FOLDER_ID", "")
 
     vision_provider = _get_env("VISION_PROVIDER", "gemini")
     vision_api_key = _get_env("VISION_API_KEY", llm_api_key)
@@ -115,6 +117,7 @@ def load_settings() -> Settings:
         consumer_queues=consumer_queues,
         run_migrations=run_migrations,
         google_drive_root_folder_id=google_drive_root_folder_id,
+        google_drive_annotated_folder_id=google_drive_annotated_folder_id,
         vision_provider=vision_provider,
         vision_api_key=vision_api_key,
         vision_model=vision_model,
