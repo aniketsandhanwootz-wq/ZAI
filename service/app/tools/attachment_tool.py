@@ -66,10 +66,8 @@ class AttachmentResolver:
 
         # Case 1: URL
         if _looks_like_url(raw):
-            # Drive URL (has id)
             did = _extract_drive_id(raw)
             if did:
-                # we will download via Drive API when needed
                 return ResolvedAttachment(
                     source_ref=raw,
                     kind="drive_id",
@@ -80,7 +78,6 @@ class AttachmentResolver:
                     drive_file_id=did,
                 )
 
-            # normal URL
             mime = ""
             name = raw.split("/")[-1] if "/" in raw else raw
             mt = _guess_mime_from_name(name)
@@ -101,10 +98,36 @@ class AttachmentResolver:
                 direct_url=raw,
             )
 
-        # Case 2: drive relative path
-        item: Optional[DriveItem] = self.drive.resolve_path(raw)
+        # Case 2: drive relative path (supports PREFIX/... with prefix->folderId)
+        rel = raw.strip().strip("/")
+        root_override = None
+
+        if "/" in rel:
+            prefix = rel.split("/", 1)[0].strip().strip("/")
+            rest = rel.split("/", 1)[1].strip().lstrip("/")
+            fid = self.drive.get_root_for_prefix(prefix)
+            if fid:
+                root_override = fid
+                rel = rest
+            else:
+                # prefix present in path but not configured => skip for now (your requirement)
+                name = raw.split("/")[-1] if "/" in raw else raw
+                mt = _guess_mime_from_name(name)
+                low = name.lower()
+                is_pdf = low.endswith(".pdf") or mt == "application/pdf"
+                is_img = (mt.startswith("image/") if mt else False) or low.endswith((".png", ".jpg", ".jpeg", ".webp"))
+                return ResolvedAttachment(
+                    source_ref=raw,
+                    kind="unknown",
+                    name=name,
+                    mime_type=mt,
+                    is_pdf=is_pdf,
+                    is_image=is_img,
+                    rel_path=raw,
+                )
+
+        item: Optional[DriveItem] = self.drive.resolve_path(rel, root_folder_id=root_override)
         if not item:
-            # unknown / not found
             name = raw.split("/")[-1] if "/" in raw else raw
             mt = _guess_mime_from_name(name)
             low = name.lower()
@@ -136,7 +159,6 @@ class AttachmentResolver:
             drive_file_id=item.file_id,
             rel_path=raw,
         )
-
     def fetch_bytes(self, att: ResolvedAttachment, *, timeout: int = 40) -> Optional[bytes]:
         if not att:
             return None

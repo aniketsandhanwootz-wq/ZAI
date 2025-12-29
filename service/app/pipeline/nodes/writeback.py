@@ -18,10 +18,7 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     annotated_urls = state.get("annotated_image_urls") or []
     photos_cell = ""
     if isinstance(annotated_urls, list) and annotated_urls:
-        # AppSheet cells often accept newline-separated URLs
         photos_cell = "\n".join([str(u).strip() for u in annotated_urls[:3] if str(u).strip()])
-
-        # also add into remark (so user sees it even if Photo column UI hides)
         reply = reply + "\n\nAnnotated images:\n" + "\n".join([f"- {u}" for u in annotated_urls[:3]])
 
     sheets = SheetsTool(settings)
@@ -42,15 +39,24 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             if client.enabled():
                 payload = {
                     "type": "checkin_ai_reply",
+
+                    # routing inputs (Power Automate should "ensure channel" by this key)
+                    "tenant_row_id": state.get("tenant_id"),
+                    "company_key": state.get("company_key") or state.get("tenant_id"),
+                    "company_name": state.get("company_name"),
+                    "company_description": state.get("company_description"),
+
+                    # checkin info
                     "checkin_id": checkin_id,
                     "project_name": state.get("project_name"),
                     "part_number": state.get("part_number"),
+                    "legacy_id": state.get("legacy_id"),
                     "status": state.get("checkin_status"),
                     "ai_reply": state.get("ai_reply"),
                     "annotated_images": annotated_urls[:3],
                 }
                 client.post_message(payload)
-                (state.get("logs") or []).append("Posted summary to Teams")
+                (state.get("logs") or []).append("Posted summary to Teams (company-routed payload)")
         except Exception as e:
             (state.get("logs") or []).append(f"Teams post failed: {e}")
 

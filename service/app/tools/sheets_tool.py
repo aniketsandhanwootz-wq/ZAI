@@ -56,14 +56,14 @@ class SheetsTool:
     - Retries on common transient errors (429/500/503).
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, spreadsheet_id: Optional[str] = None):
         self.settings = settings
         self.map: SheetMapping = load_sheet_mapping()
 
         info = parse_service_account_info(settings.google_service_account_json)
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
         self._svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
-        self._sheet_id = settings.spreadsheet_id
+        self._sheet_id = spreadsheet_id or settings.spreadsheet_id
 
         # tab_key -> {"tab_name","headers","keys","idx","rows"}
         self._cache: Dict[str, Dict[str, Any]] = {}
@@ -285,3 +285,35 @@ class SheetsTool:
 
         self._append_values(f"{tab_name}!A:ZZ", [row])
         self.refresh_cache("conversation")
+
+    def list_additional_photos_for_checkin(self, checkin_id: str, *, tab_name: str) -> List[Dict[str, Any]]:
+        """
+        Reads a tab like "Checkin Additional photos" that has columns:
+          Checkin ID, Photo, UID, Photo 2, Photo 3, Photo 4 ...
+        Returns rows (dicts keyed by casefold headers) filtered by Checkin ID.
+        """
+        values = self._get_values(f"{tab_name}!A:ZZ")
+        if not values:
+            return []
+
+        headers = [_norm_header(h) for h in values[0]]
+        keys = [_key(h) for h in headers]
+        idx = {keys[i]: i for i in range(len(keys)) if keys[i]}
+        rows = values[1:]
+
+        # find checkin id column
+        ck = idx.get(_key("Checkin ID")) or idx.get(_key("CheckIn ID")) or idx.get(_key("CheckIn Id"))
+        if ck is None:
+            return []
+
+        want = _key(checkin_id)
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            if ck < len(r) and _key(r[ck]) == want:
+                d: Dict[str, Any] = {}
+                for i, k in enumerate(keys):
+                    if not k:
+                        continue
+                    d[k] = r[i] if i < len(r) else ""
+                out.append(d)
+        return out

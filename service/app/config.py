@@ -2,14 +2,33 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> str:
     val = os.getenv(name, default)
     if required and (val is None or str(val).strip() == ""):
         raise RuntimeError(f"Missing required env var: {name}")
-    return str(val)  # intentional string coercion
+    return str(val)
+
+
+def _parse_prefix_map(raw: str) -> Dict[str, str]:
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {}
+        out: Dict[str, str] = {}
+        for k, v in data.items():
+            kk = str(k or "").strip().strip("/")
+            vv = str(v or "").strip()
+            if kk and vv:
+                out[kk] = vv
+        return out
+    except Exception:
+        return {}
 
 
 @dataclass(frozen=True)
@@ -22,16 +41,25 @@ class Settings:
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
 
+    # Optional: separate spreadsheet for additional photos
+    additional_photos_spreadsheet_id: str
+    additional_photos_tab_name: str
+
     # Drive
     google_drive_root_folder_id: str
     google_drive_annotated_folder_id: str
+
+    # Prefix-based folder root overrides
+    drive_prefix_map: Dict[str, str]
+
     # Vision (image caption + boxes)
     vision_provider: str
     vision_api_key: str
     vision_model: str
 
-    # Teams
+    # Teams (single workflow/webhook endpoint; routing handled by payload)
     teams_webhook_url: str
+
     # Webhook security
     appsheet_webhook_secret: str
 
@@ -52,34 +80,30 @@ class Settings:
     # Migrations toggle
     run_migrations: bool
 
+    # ---- Phase 2: Glide company context ----
+    glide_api_key: str
+    glide_app_id: str
+    glide_company_table: str
+    glide_company_rowid_column: str
+    glide_company_name_column: str
+    glide_company_desc_column: str
+    glide_base_url: str
+
 
 def load_settings() -> Settings:
-    # -----------------------
-    # LLM (optional Phase-0/1)
-    # -----------------------
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
     llm_model = _get_env("LLM_MODEL", "gpt-4o-mini")
 
-    # -----------------------
-    # Embeddings (Gemini)
-    # -----------------------
-    # Gemini officially supports 1536-dim embeddings
     embedding_provider = _get_env("EMBEDDING_PROVIDER", "gemini")
     embedding_api_key = _get_env("EMBEDDING_API_KEY", llm_api_key)
     embedding_model = _get_env("EMBEDDING_MODEL", "models/embedding-001")
     embedding_dims = int(_get_env("EMBEDDING_DIMS", "1536"))
 
-    # -----------------------
-    # Runtime toggles
-    # -----------------------
     run_consumer = _get_env("RUN_CONSUMER", "1").lower() in ("1", "true", "yes")
     consumer_queues = _get_env("CONSUMER_QUEUES", "default")
     run_migrations = _get_env("RUN_MIGRATIONS", "0").lower() in ("1", "true", "yes")
 
-    # -----------------------
-    # Drive + Vision + Teams
-    # -----------------------
     google_drive_root_folder_id = _get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
     google_drive_annotated_folder_id = _get_env("GOOGLE_DRIVE_ANNOTATED_FOLDER_ID", "")
 
@@ -88,23 +112,39 @@ def load_settings() -> Settings:
     vision_model = _get_env("VISION_MODEL", "gemini-2.0-flash")
 
     teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
-    # -----------------------
-    # Sheets auth (FIXED)
-    # -----------------------
-    # IMPORTANT:
-    # os.getenv avoids the "str(None) -> 'None'" bug
+
+    # Sheets auth
     sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     sa_raw = (sa_raw or "").strip()
-
-    # Treat literal "None" as empty
     if not sa_raw or sa_raw.lower() == "none":
         sa_raw = _get_env("GOOGLE_SERVICE_ACCOUNT_FILE", required=True)
+
+    # Additional photos sheet (can default to main)
+    additional_photos_spreadsheet_id = _get_env(
+        "GOOGLE_SHEET_ADDITIONAL_PHOTOS_ID",
+        _get_env("GOOGLE_SHEET_ID", required=True),
+    )
+    additional_photos_tab_name = _get_env("ADDITIONAL_PHOTOS_TAB_NAME", "Checkin Additional photos")
+
+    # Prefix map
+    drive_prefix_map = _parse_prefix_map(_get_env("DRIVE_PREFIX_MAP_JSON", ""))
+
+    # ---- Phase 2: Glide ----
+    glide_api_key = _get_env("GLIDE_API_KEY", "")
+    glide_app_id = _get_env("GLIDE_APP_ID", "")
+    glide_company_table = _get_env("GLIDE_COMPANY_TABLE", "")
+    glide_company_rowid_column = _get_env("GLIDE_COMPANY_ROWID_COLUMN", "Row ID")
+    glide_company_name_column = _get_env("GLIDE_COMPANY_NAME_COLUMN", "Name")
+    glide_company_desc_column = _get_env("GLIDE_COMPANY_DESC_COLUMN", "Short client description")
+    glide_base_url = _get_env("GLIDE_BASE_URL", "https://api.glideapp.io").rstrip("/")
 
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
         spreadsheet_id=_get_env("GOOGLE_SHEET_ID", required=True),
         google_service_account_json=sa_raw,
+        additional_photos_spreadsheet_id=additional_photos_spreadsheet_id,
+        additional_photos_tab_name=additional_photos_tab_name,
         appsheet_webhook_secret=_get_env("APPSHEET_WEBHOOK_SECRET", required=True),
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
@@ -118,25 +158,29 @@ def load_settings() -> Settings:
         run_migrations=run_migrations,
         google_drive_root_folder_id=google_drive_root_folder_id,
         google_drive_annotated_folder_id=google_drive_annotated_folder_id,
+        drive_prefix_map=drive_prefix_map,
         vision_provider=vision_provider,
         vision_api_key=vision_api_key,
         vision_model=vision_model,
         teams_webhook_url=teams_webhook_url,
+        glide_api_key=glide_api_key,
+        glide_app_id=glide_app_id,
+        glide_company_table=glide_company_table,
+        glide_company_rowid_column=glide_company_rowid_column,
+        glide_company_name_column=glide_company_name_column,
+        glide_company_desc_column=glide_company_desc_column,
+        glide_base_url=glide_base_url,
     )
 
 
 def parse_service_account_info(raw: str) -> dict:
     raw = (raw or "").strip()
     if not raw or raw.lower() == "none":
-        raise RuntimeError(
-            "Missing GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE"
-        )
+        raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_FILE")
 
-    # Case 1: raw JSON string (best for Render)
     if raw.startswith("{"):
         return json.loads(raw)
 
-    # Case 2: file path
     p = Path(raw).expanduser()
     candidates = [p]
 

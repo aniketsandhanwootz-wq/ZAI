@@ -5,6 +5,7 @@ import re
 
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
+from ...tools.company_tool import CompanyTool
 
 
 _CLOSURE_HINTS = re.compile(
@@ -14,10 +15,6 @@ _CLOSURE_HINTS = re.compile(
 
 
 def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
-    """
-    Best-effort extraction of "what was done + what result + evidence" from conversation.
-    We do NOT invent anything; we only select/condense what already exists.
-    """
     picked: List[str] = []
 
     for r in (convo_rows or [])[-25:]:
@@ -30,16 +27,13 @@ def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
         if not line:
             continue
 
-        # prefer explicit closure-ish statuses
         if st.strip().upper() in ("PASS", "PASSED", "FAIL", "FAILED", "CLOSED", "DONE", "OK"):
             picked.append(line)
             continue
 
-        # else: keyword hint
         if _CLOSURE_HINTS.search(line):
             picked.append(line)
 
-    # de-dup preserving order
     out: List[str] = []
     seen = set()
     for x in picked:
@@ -48,7 +42,6 @@ def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
             out.append(x)
             seen.add(k)
 
-    # keep it tight
     out = out[-8:]
     return "\n- " + "\n- ".join(out) if out else ""
 
@@ -107,8 +100,26 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
         convo_rows = sheets.get_conversations_for_checkin(str(checkin_id))
     state["conversation_rows"] = convo_rows
 
-    # ✅ Closure memory candidates from conversation (what worked / what failed)
+    # ✅ Closure memory candidates from conversation
     state["closure_notes"] = _extract_closure_notes(convo_rows)
+
+    # ✅ Phase 2: Company context via Glide (optional)
+    state["company_name"] = None
+    state["company_description"] = None
+    state["company_key"] = None
+    if tenant_id:
+        try:
+            ct = CompanyTool(settings)
+            ctx = ct.get_company_context(tenant_id)
+            if ctx:
+                state["company_name"] = ctx.company_name or None
+                state["company_description"] = ctx.company_description or None
+                state["company_key"] = ctx.company_key or None
+                (state.get("logs") or []).append(
+                    f"Loaded company context via Glide: name='{ctx.company_name}' key='{ctx.company_key}'"
+                )
+        except Exception as e:
+            (state.get("logs") or []).append(f"Company context lookup failed (non-fatal): {e}")
 
     (state.get("logs") or []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes")
     return state

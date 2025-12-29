@@ -12,7 +12,6 @@ from googleapiclient.http import MediaIoBaseUpload
 from ..config import Settings, parse_service_account_info
 
 
-# NOTE: need upload + permissions => not readonly
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 
@@ -34,16 +33,15 @@ class DriveTool:
     """
 
     def __init__(self, settings: Settings):
+        self.settings = settings  # ✅ FIX: needed for prefix map + settings access
+
         info = parse_service_account_info(settings.google_service_account_json)
         creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
 
         self.root_folder_id = (getattr(settings, "google_drive_root_folder_id", "") or "").strip()
-        self.annotated_root_folder_id = (
-            getattr(settings, "google_drive_annotated_folder_id", "") or ""
-        ).strip()
+        self.annotated_root_folder_id = (getattr(settings, "google_drive_annotated_folder_id", "") or "").strip()
 
-        # caches
         self._folder_cache: Dict[tuple[str, str], Optional[str]] = {}
         self._file_cache: Dict[tuple[str, str], Optional[DriveItem]] = {}
 
@@ -86,16 +84,8 @@ class DriveTool:
         return folder_id
 
     def _create_folder(self, parent_id: str, folder_name: str) -> str:
-        body = {
-            "name": folder_name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id],
-        }
-        resp = (
-            self._svc.files()
-            .create(body=body, fields="id", supportsAllDrives=True)
-            .execute()
-        )
+        body = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
+        resp = self._svc.files().create(body=body, fields="id", supportsAllDrives=True).execute()
         fid = resp["id"]
         self._folder_cache[(parent_id, folder_name)] = fid
         return fid
@@ -161,11 +151,7 @@ class DriveTool:
 
     def _make_public(self, file_id: str) -> None:
         body = {"type": "anyone", "role": "reader"}
-        self._svc.permissions().create(
-            fileId=file_id,
-            body=body,
-            supportsAllDrives=True,
-        ).execute()
+        self._svc.permissions().create(fileId=file_id, body=body, supportsAllDrives=True).execute()
 
     def upload_bytes_to_subpath(
         self,
@@ -190,12 +176,7 @@ class DriveTool:
 
         resp = (
             self._svc.files()
-            .create(
-                body=body,
-                media_body=media,
-                fields="id,webViewLink,webContentLink",
-                supportsAllDrives=True,
-            )
+            .create(body=body, media_body=media, fields="id,webViewLink,webContentLink", supportsAllDrives=True)
             .execute()
         )
         fid = resp["id"]
@@ -203,7 +184,6 @@ class DriveTool:
         if make_public:
             try:
                 self._make_public(fid)
-                # refresh links
                 resp2 = (
                     self._svc.files()
                     .get(fileId=fid, fields="id,webViewLink,webContentLink", supportsAllDrives=True)
@@ -240,3 +220,9 @@ class DriveTool:
             make_public=make_public,
             root_folder_id=root,
         )
+
+    def get_root_for_prefix(self, prefix: str) -> Optional[str]:
+        prefix = (prefix or "").strip().strip("/")
+        mp = getattr(self.settings, "drive_prefix_map", {}) or {}
+        fid = mp.get(prefix)
+        return (fid or "").strip() or None
