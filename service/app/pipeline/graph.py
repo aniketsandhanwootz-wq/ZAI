@@ -29,27 +29,32 @@ def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
 
 load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
+analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
 upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
 retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
 rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
 generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
 writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
-analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
+
 
 def _tenant_from_payload(payload: Dict[str, Any]) -> str:
     rmeta = payload.get("meta") or {}
     return str(rmeta.get("tenant_id") or "")
 
 
+# ✅ Your requirement: only run full pipeline for CheckIN created
+_ALLOWED_EVENT_TYPES = {"CHECKIN_CREATED"}
+
+
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
-    event_type = str(payload.get("event_type") or "UNKNOWN")
+    event_type = str(payload.get("event_type") or "UNKNOWN").strip()
     primary_id = str(
         payload.get("checkin_id")
         or payload.get("conversation_id")
         or payload.get("ccp_id")
         or payload.get("legacy_id")
         or "UNKNOWN"
-    )
+    ).strip()
 
     runlog = RunLog(settings)
     tenant_id_hint = (_tenant_from_payload(payload) or "UNKNOWN").strip()
@@ -74,6 +79,21 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         return out
 
     try:
+        # ✅ HARD GATE
+        if event_type not in _ALLOWED_EVENT_TYPES:
+            msg = f"Skipping pipeline for event_type='{event_type}' (allowed={sorted(_ALLOWED_EVENT_TYPES)})"
+            (state.get("logs") or []).append(msg)
+            logger.info(msg)
+            runlog.success(run_id)
+            return {
+                "run_id": run_id,
+                "ok": True,
+                "skipped": True,
+                "primary_id": primary_id,
+                "event_type": event_type,
+                "logs": state.get("logs"),
+            }
+
         state = _timed("load_sheet_data", load_sheet_data)
 
         tenant_id = str(state.get("tenant_id") or "").strip()
@@ -82,11 +102,17 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
 
         state = _timed("build_thread_snapshot", build_thread_snapshot)
         state = _timed("analyze_media", analyze_media)
-        state = _timed("upsert_vectors", upsert_vectors)
+
+        # ✅ Retrieve BEFORE upsert (avoid self match)
         state = _timed("retrieve_context", retrieve_context)
         state = _timed("rerank_context", rerank_context)
         state = _timed("generate_ai_reply", generate_ai_reply)
+
+        # ✅ Store vectors after reply
+        state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("writeback", writeback)
+
+
 
         runlog.success(run_id)
         logger.info("SUCCESS primary_id=%s", primary_id)
@@ -95,6 +121,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             "run_id": run_id,
             "ok": True,
             "primary_id": primary_id,
+            "event_type": event_type,
             "ai_reply": state.get("ai_reply"),
             "writeback_done": state.get("writeback_done"),
             "logs": state.get("logs"),
@@ -108,6 +135,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             "ok": False,
             "error": str(e),
             "primary_id": primary_id,
+            "event_type": event_type,
             "logs": state.get("logs"),
         }
 

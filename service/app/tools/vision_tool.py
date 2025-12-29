@@ -1,11 +1,13 @@
 # service/app/tools/vision_tool.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 import base64
 import json
 import os
 import requests
+
+from ..config import Settings  # ✅ allow init from Settings
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -64,11 +66,36 @@ class VisionTool:
     IMPORTANT: We separate them into two calls:
       - caption_for_retrieval(): returns 6-line caption only (plain text)
       - detect_defects(): returns JSON { "defects": [...] } only
+
+    Compatibility:
+      - Can be constructed either as VisionTool(settings) OR VisionTool(api_key=..., model=...)
+      - Provides caption_image(...) alias for older callers.
     """
 
-    def __init__(self, *, api_key: str, model: str, base_url: Optional[str] = None):
-        self.api_key = api_key
-        self.model = model or "gemini-2.0-flash"
+    def __init__(
+        self,
+        settings_or_api_key: Union[Settings, str, None] = None,
+        *,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        # --- Init from Settings ---
+        if isinstance(settings_or_api_key, Settings):
+            s = settings_or_api_key
+            self.api_key = (getattr(s, "vision_api_key", "") or "").strip()
+            self.model = (getattr(s, "vision_model", "") or "gemini-2.0-flash").strip()
+            self.base = (
+                (base_url or os.getenv("VISION_BASE_URL") or os.getenv("LLM_BASE_URL") or "https://generativelanguage.googleapis.com")
+            ).rstrip("/")
+            return
+
+        # --- Init from explicit args (backward-compatible with your current file) ---
+        if isinstance(settings_or_api_key, str) and settings_or_api_key.strip() and not api_key:
+            api_key = settings_or_api_key.strip()
+
+        self.api_key = (api_key or "").strip()
+        self.model = (model or "gemini-2.0-flash").strip()
         self.base = (
             base_url
             or os.getenv("VISION_BASE_URL")
@@ -79,6 +106,14 @@ class VisionTool:
     def _url(self, model: Optional[str] = None) -> str:
         m = (model or self.model or "gemini-2.0-flash").strip()
         return f"{self.base}/v1beta/models/{m}:generateContent?key={self.api_key}"
+
+    # ✅ Compatibility alias: CCP ingest expects this name/signature
+    def caption_image(self, *, image_bytes: bytes, mime_type: str, context: str = "") -> str:
+        return self.caption_for_retrieval(
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            context_hint=context,
+        )
 
     def caption_for_retrieval(
         self,
@@ -227,7 +262,6 @@ class VisionTool:
             x2 = _clamp01(box.get("x2", 0.0))
             y2 = _clamp01(box.get("y2", 0.0))
 
-            # ensure ordering
             if x2 < x1:
                 x1, x2 = x2, x1
             if y2 < y1:

@@ -16,6 +16,17 @@ def _load_prompt_template() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
+    """
+    Safe renderer: ONLY replaces our known placeholders like {snapshot}, {ctx}, etc.
+    Leaves any other braces (e.g., JSON examples) untouched.
+    """
+    out = template
+    for k, v in vars.items():
+        out = out.replace("{" + k + "}", v or "")
+    return out
+
+
 def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     tenant_id = (state.get("tenant_id") or "").strip()
     snapshot = (state.get("thread_snapshot_text") or "").strip()
@@ -26,7 +37,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             "Please fill Project → Company row id for this ID and re-trigger. "
             "Also share: measurement method, stage/process, and 1 clear inspection photo."
         )
-        (state.get("logs") or []).append("Generated SAFE reply (missing tenant)")
+        state.setdefault("logs", []).append("Generated SAFE reply (missing tenant)")
         return state
 
     ctx = (state.get("packed_context") or "").strip()
@@ -45,14 +56,17 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
 
     template = _load_prompt_template()
 
-    prompt = template.format(
-        snapshot=snapshot,
-        ctx=ctx,
-        closure_notes=closure_notes,
-        company_context=company_context,
+    prompt = _render_template_safe(
+        template,
+        {
+            "snapshot": snapshot,
+            "ctx": ctx,
+            "closure_notes": closure_notes,
+            "company_context": company_context,
+        },
     )
 
     llm = LLMTool(settings)
     state["ai_reply"] = llm.generate_text(prompt).strip()
-    (state.get("logs") or []).append("Generated AI reply (standardized + company-aware)")
+    state.setdefault("logs", []).append("Generated AI reply (safe-template)")
     return state

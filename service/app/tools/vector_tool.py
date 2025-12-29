@@ -13,8 +13,19 @@ def _vec_str(v: List[float]) -> str:
     return "[" + ",".join(f"{float(x):.8f}" for x in v) + "]"
 
 
-def _sha256(s: str) -> str:
+def _sha256_text(s: str) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b or b"").hexdigest()
+
+
+def _norm_text_for_hash(s: str) -> str:
+    # makes pdf extraction + captions more stable across whitespace differences
+    s = (s or "").replace("\r", "\n")
+    s = "\n".join([ln.strip() for ln in s.split("\n") if ln.strip()])
+    return s.strip()
 
 
 class VectorTool:
@@ -23,6 +34,32 @@ class VectorTool:
 
     def _conn(self):
         return psycopg2.connect(self.settings.database_url)
+
+    # ---------------------------
+    # Hash helpers (stable/idempotent)
+    # ---------------------------
+
+    def hash_text(self, s: str) -> str:
+        return _sha256_text(_norm_text_for_hash(s))
+
+    def hash_bytes(self, b: bytes) -> str:
+        return _sha256_bytes(b)
+
+    def make_ccp_content_hash(
+        self,
+        *,
+        ccp_id: str,
+        chunk_type: str,
+        stable_key: str,
+        chunk_text: str = "",
+    ) -> str:
+        """
+        stable_key examples:
+          - "DESC" for description chunks (hash is driven by chunk_text anyway)
+          - file_hash for PDFs/images so the same file maps to same hash family
+        """
+        base = f"{ccp_id}|{chunk_type}|{stable_key}|{_norm_text_for_hash(chunk_text)}"
+        return _sha256_text(base)
 
     # ---------------------------
     # Existence checks (incremental)
@@ -59,6 +96,25 @@ class VectorTool:
         """
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(sql, (tenant_id, checkin_id, vector_type))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def get_ccp_chunk_text(
+        self,
+        *,
+        tenant_id: str,
+        ccp_id: str,
+        chunk_type: str,
+        content_hash: str,
+    ) -> Optional[str]:
+        sql = """
+        SELECT chunk_text
+        FROM ccp_vectors
+        WHERE tenant_id=%s AND ccp_id=%s AND chunk_type=%s AND content_hash=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, ccp_id, chunk_type, content_hash))
             row = cur.fetchone()
             return row[0] if row else None
 
@@ -127,7 +183,8 @@ class VectorTool:
         embedding: List[float],
         content_hash: Optional[str] = None,
     ) -> None:
-        h = content_hash or _sha256(f"{ccp_id}|{chunk_type}|{chunk_text}")
+        # If caller provides content_hash, we trust it. Else compute from chunk_text.
+        h = content_hash or _sha256_text(f"{ccp_id}|{chunk_type}|{_norm_text_for_hash(chunk_text)}")
 
         sql = """
         INSERT INTO ccp_vectors (
@@ -180,8 +237,9 @@ class VectorTool:
         embedding: List[float],
         content_hash: Optional[str] = None,
     ) -> None:
-        # hash should be stable on message+project scope
-        h = content_hash or _sha256(f"{tenant_id}|{legacy_id or ''}|{project_name or ''}|{part_number or ''}|{update_message}")
+        h = content_hash or _sha256_text(
+            f"{tenant_id}|{legacy_id or ''}|{project_name or ''}|{part_number or ''}|{update_message}"
+        )
 
         sql = """
         INSERT INTO dashboard_vectors (

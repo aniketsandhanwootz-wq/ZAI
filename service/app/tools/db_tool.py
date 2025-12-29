@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Set
 import json
 import psycopg2
 
@@ -14,28 +14,33 @@ class DBTool:
         conn.autocommit = True
         return conn
 
-    def artifact_exists(
+    def existing_artifact_source_hashes(
         self,
         *,
         tenant_id: str,
         checkin_id: str,
         artifact_type: str,
-        source_hash: str,
-    ) -> bool:
-        q = """
-        SELECT 1
-        FROM artifacts a
-        JOIN ai_runs r ON r.run_id = a.run_id
-        WHERE r.tenant_id = %s
-          AND a.artifact_type = %s
-          AND COALESCE(a.meta->>'checkin_id','') = %s
-          AND COALESCE(a.meta->>'source_hash','') = %s
-        LIMIT 1
+    ) -> Set[str]:
         """
+        Returns a set of source_hash strings already stored for this tenant+checkin+type.
+        Uses meta JSON so we don't need a join.
+        """
+        q = """
+        SELECT COALESCE(meta->>'source_hash','') AS source_hash
+        FROM artifacts
+        WHERE artifact_type = %s
+          AND COALESCE(meta->>'tenant_id','') = %s
+          AND COALESCE(meta->>'checkin_id','') = %s
+          AND COALESCE(meta->>'source_hash','') <> ''
+        """
+        out: Set[str] = set()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(q, (tenant_id, artifact_type, checkin_id, source_hash))
-                return cur.fetchone() is not None
+                cur.execute(q, (artifact_type, tenant_id, checkin_id))
+                for (h,) in cur.fetchall() or []:
+                    if h:
+                        out.add(str(h))
+        return out
 
     def insert_artifact(
         self,

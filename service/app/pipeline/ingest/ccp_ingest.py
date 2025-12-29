@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 from io import BytesIO
+import re
 
 from pypdf import PdfReader
 
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.embed_tool import EmbedTool
-from ...tools.llm_tool import LLMTool
 from ...tools.vector_tool import VectorTool
 from ...tools.drive_tool import DriveTool
 from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
+from ...tools.vision_tool import VisionTool
 from . import utils as ingest_utils
 
 
@@ -26,24 +27,47 @@ def _extract_pdf_text_from_bytes(data: bytes) -> str:
         return ""
 
 
+def _norm_text(s: str) -> str:
+    s = (s or "").replace("\r", "\n")
+    # collapse excessive whitespace; keep lines
+    s = "\n".join([ln.strip() for ln in s.split("\n") if ln.strip()])
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def _is_pdf_bytes(b: bytes) -> bool:
+    return (b or b"")[:5] == b"%PDF-"
+
+
+def _sniff_image_mime(b: bytes) -> Optional[str]:
+    bb = b or b""
+    if bb.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if bb.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if bb[:4] == b"RIFF" and bb[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def ingest_ccp(settings: Settings) -> Dict[str, Any]:
     sheets = SheetsTool(settings)
     embedder = EmbedTool(settings)
-    llm = LLMTool(settings)
     vec = VectorTool(settings)
 
     drive = DriveTool(settings)
     resolver = AttachmentResolver(drive)
+    vision = VisionTool(settings)
 
     # ---------------------------
     # Build Project indexes ONCE
     # ---------------------------
     projects = sheets.list_projects()
 
-    col_pid = sheets.map.col("project", "legacy_id")        # "ID"
-    col_tenant = sheets.map.col("project", "company_row_id")  # "Company row id"
-    col_pname = sheets.map.col("project", "project_name")   # "Project name"
-    col_pnum = sheets.map.col("project", "part_number")     # "Part number"
+    col_pid = sheets.map.col("project", "legacy_id")           # "ID"
+    col_tenant = sheets.map.col("project", "company_row_id")   # "Company row id"
+    col_pname = sheets.map.col("project", "project_name")      # "Project name"
+    col_pnum = sheets.map.col("project", "part_number")        # "Part number"
 
     k_pid = _key(col_pid)
     k_tenant = _key(col_tenant)
@@ -76,7 +100,6 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
     rows = sheets.list_ccp()
     total_rows = len(rows)
 
-    # CCP columns from mapping
     col_ccp_id = sheets.map.col("ccp", "ccp_id")
     col_legacy_id = sheets.map.col("ccp", "legacy_id")
     col_ccp_name = sheets.map.col("ccp", "ccp_name")
@@ -149,16 +172,17 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
 
         rows_ingested += 1
 
-        # 1) CCP description chunks (incremental via content_hash)
+        # 1) CCP description chunks (idempotent via hash)
         if desc:
-            chunks = ingest_utils.chunk_text(f"CCP: {ccp_name}\n{desc}")
+            chunks = ingest_utils.chunk_text(_norm_text(f"CCP: {ccp_name}\n{desc}"))
             for ch in chunks:
-                content_hash = None  # VectorTool will compute if None
-                # pre-check by hash requires same hash logic -> we keep it simple:
-                # compute same as VectorTool default:
-                import hashlib
-                content_hash = hashlib.sha256(f"{ccp_id}|CCP_DESC|{ch}".encode("utf-8")).hexdigest()
-                if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="CCP_DESC", content_hash=content_hash):
+                # stable key "DESC" + normalized chunk
+                content_hash = vec.make_ccp_content_hash(
+                    ccp_id=ccp_id, chunk_type="CCP_DESC", stable_key="DESC", chunk_text=ch
+                )
+                if vec.ccp_hash_exists(
+                    tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="CCP_DESC", content_hash=content_hash
+                ):
                     skipped_existing += 1
                     continue
                 try:
@@ -189,8 +213,6 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
         all_refs.extend(split_cell_refs(files_val))
         all_refs.extend(split_cell_refs(photos_val))
         all_refs.extend(split_cell_refs(main_val))
-
-        # keep sane
         all_refs = all_refs[:50]
 
         for ref in all_refs:
@@ -198,28 +220,37 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
             if not att:
                 continue
 
-            # skip non pdf/image quickly
-            if not (att.is_pdf or att.is_image):
+            data = resolver.fetch_bytes(att)
+            if not data:
+                unresolved_files += 1
                 continue
 
-            # --- PDFs ---
-            if att.is_pdf:
-                data = resolver.fetch_bytes(att)
-                if not data:
-                    unresolved_files += 1
-                    continue
+            resolved_files += 1
+            file_hash = vec.hash_bytes(data)
 
-                resolved_files += 1
+            # Decide PDF/image from bytes (more reliable than resolver flags)
+            is_pdf = att.is_pdf or _is_pdf_bytes(data)
+            img_mime = att.mime_type or _sniff_image_mime(data)
+            is_img = att.is_image or bool(img_mime and img_mime.startswith("image/"))
+
+            # --- PDFs ---
+            if is_pdf:
                 text = _extract_pdf_text_from_bytes(data)
+                text = _norm_text(text)
                 if not text:
                     continue
 
                 for ch in ingest_utils.chunk_text(text):
-                    import hashlib
-                    content_hash = hashlib.sha256(f"{ccp_id}|PDF_TEXT|{ch}".encode("utf-8")).hexdigest()
-                    if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="PDF_TEXT", content_hash=content_hash):
+                    # stable key = file_hash so re-ingestion is deterministic per file
+                    content_hash = vec.make_ccp_content_hash(
+                        ccp_id=ccp_id, chunk_type="PDF_TEXT", stable_key=file_hash, chunk_text=ch
+                    )
+                    if vec.ccp_hash_exists(
+                        tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="PDF_TEXT", content_hash=content_hash
+                    ):
                         skipped_existing += 1
                         continue
+
                     try:
                         emb = embedder.embed_text(ch)
                         vec.upsert_ccp_chunk(
@@ -242,33 +273,35 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
                 continue
 
             # --- Images ---
-            if att.is_image:
-                data = resolver.fetch_bytes(att)
-                if not data:
-                    unresolved_files += 1
-                    continue
+            if is_img:
+                # Build a stable caption doc (tied to file_hash)
+                context = (
+                    f"CCP Name: {ccp_name}\n"
+                    f"Project: {project_name}\n"
+                    f"Part: {part_number}\n"
+                    f"SourceRef: {att.source_ref}\n"
+                    f"FileHash: {file_hash}"
+                ).strip()
 
-                resolved_files += 1
-
-                # Stable-ish caption context
-                context = f"CCP Name: {ccp_name}\nProject: {project_name}\nPart: {part_number}\nSourceRef: {att.source_ref}"
-
-                caption = llm.caption_image(image_bytes=data, mime_type=att.mime_type or "image/jpeg", context=context)
-                caption = (caption or "").strip()
-                if not caption:
-                    continue
-
-                # make chunk_text deterministic & tied to the file identity (so re-ingestion stays stable)
-                file_key = att.drive_file_id or att.name or att.source_ref
-                chunk_text = f"[CCP_IMAGE]\nFILE: {file_key}\n{caption}".strip()
-
-                import hashlib
-                content_hash = hashlib.sha256(f"{ccp_id}|IMG_CAPTION|{file_key}".encode("utf-8")).hexdigest()
-                if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="IMG_CAPTION", content_hash=content_hash):
+                # We store exactly one caption chunk per file_hash
+                content_hash = vec.make_ccp_content_hash(
+                    ccp_id=ccp_id, chunk_type="IMG_CAPTION", stable_key=file_hash, chunk_text=""
+                )
+                if vec.ccp_hash_exists(
+                    tenant_id=tenant_id, ccp_id=ccp_id, chunk_type="IMG_CAPTION", content_hash=content_hash
+                ):
                     skipped_existing += 1
                     continue
 
                 try:
+                    mime = img_mime or "image/jpeg"
+                    caption = vision.caption_image(image_bytes=data, mime_type=mime, context=context)
+                    caption = _norm_text(caption or "")
+                    if not caption:
+                        continue
+
+                    chunk_text = f"[CCP_IMAGE]\nFILE_HASH: {file_hash}\n{caption}".strip()
+
                     emb = embedder.embed_text(chunk_text)
                     vec.upsert_ccp_chunk(
                         tenant_id=tenant_id,
@@ -305,5 +338,5 @@ def ingest_ccp(settings: Settings) -> Dict[str, Any]:
         "unresolved_files": unresolved_files,
         "skipped_existing": skipped_existing,
         "embed_errors": embed_errors,
-        "note": "Now resolves Drive paths under GOOGLE_DRIVE_ROOT_FOLDER_ID and captions images; skips already-ingested chunks via content_hash.",
+        "note": "Hardened: byte-sniff PDF/image + file-hash idempotency + stable hashes; captions via VisionTool; safe to re-run anytime.",
     }

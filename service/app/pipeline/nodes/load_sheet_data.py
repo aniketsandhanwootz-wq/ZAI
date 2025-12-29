@@ -85,6 +85,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     state["checkin_status"] = _norm_value((checkin_row or {}).get(k_ci_status, ""))
     state["checkin_description"] = _norm_value((checkin_row or {}).get(k_ci_desc, ""))
 
+    # Resolve tenant_id via Project sheet (still used for DB / vectors)
     tenant_id = ""
     project_row = None
     if project_name and part_number and legacy_id:
@@ -92,6 +93,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
         if project_row:
             k_tenant = _key(sheets.map.col("project", "company_row_id"))
             tenant_id = _norm_value(project_row.get(k_tenant, ""))
+
     state["project_row"] = project_row
     state["tenant_id"] = tenant_id or None
 
@@ -100,26 +102,49 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
         convo_rows = sheets.get_conversations_for_checkin(str(checkin_id))
     state["conversation_rows"] = convo_rows
 
-    # ✅ Closure memory candidates from conversation
+    # Closure memory candidates from conversation
     state["closure_notes"] = _extract_closure_notes(convo_rows)
 
-    # ✅ Phase 2: Company context via Glide (optional)
+    # ✅ Company routing (Phase 2 requirement)
+    # 1) Derive from PROJECT NAME (this is your source of truth for Teams channel grouping)
+    # 2) If Glide is configured + returns a real name, override (optional enhancement)
     state["company_name"] = None
     state["company_description"] = None
     state["company_key"] = None
-    if tenant_id:
-        try:
-            ct = CompanyTool(settings)
-            ctx = ct.get_company_context(tenant_id)
-            if ctx:
-                state["company_name"] = ctx.company_name or None
-                state["company_description"] = ctx.company_description or None
-                state["company_key"] = ctx.company_key or None
-                (state.get("logs") or []).append(
-                    f"Loaded company context via Glide: name='{ctx.company_name}' key='{ctx.company_key}'"
-                )
-        except Exception as e:
-            (state.get("logs") or []).append(f"Company context lookup failed (non-fatal): {e}")
 
-    (state.get("logs") or []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes")
+    try:
+        ct = CompanyTool(settings)
+
+        # Fallback-from-project: always attempt
+        proj_ctx = ct.from_project_name(project_name or "", tenant_row_id=tenant_id or "")
+        if proj_ctx:
+            state["company_name"] = proj_ctx.company_name or None
+            state["company_key"] = proj_ctx.company_key or None
+            state["company_description"] = None
+            (state.get("logs") or []).append(
+                f"Derived company from project_name: company='{proj_ctx.company_name}' key='{proj_ctx.company_key}'"
+            )
+
+        # Glide override (only if tenant_id exists and Glide returns a real company name)
+        if tenant_id:
+            glide_ctx = ct.get_company_context(tenant_id)
+            if glide_ctx and (glide_ctx.company_name or "").strip():
+                state["company_name"] = glide_ctx.company_name or state["company_name"]
+                state["company_description"] = glide_ctx.company_description or None
+                state["company_key"] = glide_ctx.company_key or state["company_key"]
+                (state.get("logs") or []).append(
+                    f"Loaded company context via Glide (override): name='{glide_ctx.company_name}' key='{glide_ctx.company_key}'"
+                )
+
+        # If we still don't have a key but we have a name, set a stable fallback
+        if not state.get("company_key") and state.get("company_name"):
+            # last resort: slug-like key using CompanyTool helper via from_project_name
+            proj_ctx2 = ct.from_project_name(state["company_name"], tenant_row_id=tenant_id or "")
+            if proj_ctx2:
+                state["company_key"] = proj_ctx2.company_key or None
+
+    except Exception as e:
+        (state.get("logs") or []).append(f"Company routing build failed (non-fatal): {e}")
+
+    (state.get("logs") or []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes + company routing")
     return state

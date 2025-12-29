@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 import re
 
 from ..config import Settings
@@ -13,6 +13,42 @@ def _slug(s: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", s)
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return s or ""
+
+
+# Split project name on common separators, keep left as "company-ish"
+_SPLIT_RE = re.compile(r"\s*[-–—|]\s*")  # -, –, —, |
+_TRAILING_NUM_RE = re.compile(r"\s*(#?\d+)\s*$")  # " 114" or " #114"
+
+
+def derive_company_name_from_project_name(project_name: str) -> str:
+    """
+    Examples:
+      "Unnati 114 - sdfggg" -> "Unnati"
+      "Gilbert 1 - fgtrbbrt" -> "Gilbert"
+      "ACME Corp 12 – something" -> "ACME Corp"
+      "Unnati - abc" -> "Unnati"
+      "Unnati 114" -> "Unnati"
+    """
+    s = (project_name or "").strip()
+    if not s:
+        return ""
+
+    # Take left side of split (company-ish prefix)
+    left = _SPLIT_RE.split(s, maxsplit=1)[0].strip()
+    left = re.sub(r"\s{2,}", " ", left).strip()
+
+    # Remove trailing numeric token (job number / sequence)
+    # "Unnati 114" -> "Unnati"
+    left2 = _TRAILING_NUM_RE.sub("", left).strip()
+
+    # If we accidentally removed everything (rare), keep original left
+    name = left2 or left
+    name = re.sub(r"\s{2,}", " ", name).strip()
+
+    # Guardrails
+    if len(name) < 2:
+        return ""
+    return name
 
 
 @dataclass
@@ -28,7 +64,31 @@ class CompanyTool:
         self.settings = settings
         self.glide = GlideClient(settings)
 
+    def from_project_name(self, project_name: str, *, tenant_row_id: str = "") -> Optional[CompanyContext]:
+        """
+        Fallback: derive company from Project name.
+        This is the routing source of truth if Glide isn't configured or doesn't return a name.
+        """
+        name = derive_company_name_from_project_name(project_name)
+        if not name:
+            return None
+
+        key = _slug(name) or _slug(project_name) or (tenant_row_id or "")
+        if not key:
+            # last resort: make a stable key from the name itself
+            key = _slug(name)
+
+        return CompanyContext(
+            tenant_row_id=(tenant_row_id or "").strip(),
+            company_key=key,
+            company_name=name,
+            company_description="",
+        )
+
     def get_company_context(self, tenant_row_id: str) -> Optional[CompanyContext]:
+        """
+        Primary: Glide (if configured).
+        """
         tenant_row_id = (tenant_row_id or "").strip()
         if not tenant_row_id:
             return None
@@ -46,6 +106,10 @@ class CompanyTool:
         # 1) slug(company_name) if available
         # 2) tenant_row_id fallback (still stable, but not pretty)
         key = _slug(name) or tenant_row_id
+
+        # If Glide returns nothing useful, treat as "not found"
+        if not name and not desc:
+            return None
 
         return CompanyContext(
             tenant_row_id=tenant_row_id,
