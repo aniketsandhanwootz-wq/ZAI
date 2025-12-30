@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from io import BytesIO
+import logging
+import re
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -13,6 +15,20 @@ from ..config import Settings, parse_service_account_info
 
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+logger = logging.getLogger("zai.drive")
+
+_DRIVE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
+
+
+def _is_valid_drive_id(v: str) -> bool:
+    s = (v or "").strip()
+    if not s:
+        return False
+    if s.startswith("<<") and s.endswith(">>"):
+        return False
+    if "folderId" in s or "<" in s or ">" in s:
+        return False
+    return bool(_DRIVE_ID_RX.match(s))
 
 
 @dataclass
@@ -33,7 +49,7 @@ class DriveTool:
     """
 
     def __init__(self, settings: Settings):
-        self.settings = settings  # ✅ FIX: needed for prefix map + settings access
+        self.settings = settings
 
         info = parse_service_account_info(settings.google_service_account_json)
         creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
@@ -49,19 +65,28 @@ class DriveTool:
         out: List[Dict[str, Any]] = []
         page_token = None
         while True:
-            resp = (
-                self._svc.files()
-                .list(
-                    q=q,
-                    spaces="drive",
-                    fields=f"nextPageToken, files({fields})",
-                    pageToken=page_token,
-                    pageSize=200,
-                    includeItemsFromAllDrives=True,
-                    supportsAllDrives=True,
+            try:
+                resp = (
+                    self._svc.files()
+                    .list(
+                        q=q,
+                        spaces="drive",
+                        fields=f"nextPageToken, files({fields})",
+                        pageToken=page_token,
+                        pageSize=200,
+                        includeItemsFromAllDrives=True,
+                        supportsAllDrives=True,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
+            except HttpError as e:
+                # ✅ Never crash ingestion because Drive lookup failed
+                logger.warning("Drive list failed (non-fatal). q=%s err=%s", q[:200], str(e))
+                return out
+            except Exception as e:
+                logger.warning("Drive list failed (non-fatal). q=%s err=%s", q[:200], str(e))
+                return out
+
             out.extend(resp.get("files", []) or [])
             page_token = resp.get("nextPageToken")
             if not page_token:
@@ -119,7 +144,7 @@ class DriveTool:
 
     def resolve_path(self, rel_path: str, *, root_folder_id: Optional[str] = None) -> Optional[DriveItem]:
         root = (root_folder_id or self.root_folder_id or "").strip()
-        if not root:
+        if not root or not _is_valid_drive_id(root):
             return None
 
         p = (rel_path or "").strip().strip("/")
@@ -224,5 +249,7 @@ class DriveTool:
     def get_root_for_prefix(self, prefix: str) -> Optional[str]:
         prefix = (prefix or "").strip().strip("/")
         mp = getattr(self.settings, "drive_prefix_map", {}) or {}
-        fid = mp.get(prefix)
-        return (fid or "").strip() or None
+        fid = (mp.get(prefix) or "").strip()
+        if not _is_valid_drive_id(fid):
+            return None
+        return fid

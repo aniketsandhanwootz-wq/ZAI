@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict
@@ -10,6 +11,24 @@ def _get_env(name: str, default: Optional[str] = None, required: bool = False) -
     if required and (val is None or str(val).strip() == ""):
         raise RuntimeError(f"Missing required env var: {name}")
     return str(val)
+
+
+_DRIVE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
+
+
+def _is_valid_drive_id(v: str) -> bool:
+    """
+    Drive file/folder ids are typically URL-safe base64-ish strings.
+    This rejects placeholders like <<folderId>> and obvious garbage.
+    """
+    s = (v or "").strip()
+    if not s:
+        return False
+    if s.startswith("<<") and s.endswith(">>"):
+        return False
+    if "folderId" in s or "<" in s or ">" in s:
+        return False
+    return bool(_DRIVE_ID_RX.match(s))
 
 
 def _parse_prefix_map(raw: str) -> Dict[str, str]:
@@ -24,8 +43,12 @@ def _parse_prefix_map(raw: str) -> Dict[str, str]:
         for k, v in data.items():
             kk = str(k or "").strip().strip("/")
             vv = str(v or "").strip()
-            if kk and vv:
-                out[kk] = vv
+            if not kk or not vv:
+                continue
+            # ✅ Ignore placeholders / invalid IDs so ingestion doesn't crash
+            if not _is_valid_drive_id(vv):
+                continue
+            out[kk] = vv
         return out
     except Exception:
         return {}

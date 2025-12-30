@@ -1,13 +1,14 @@
+# service/app/pipeline/nodes/analyze_media.py
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import hashlib
 import re
 
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.drive_tool import DriveTool
-from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
+from ...tools.attachment_tool import AttachmentResolver, split_cell_refs, ResolvedAttachment
 from ...tools.vision_tool import VisionTool
 from ...tools.annotate_tool import AnnotateTool
 from ...tools.db_tool import DBTool
@@ -22,13 +23,10 @@ def _sha256(b: bytes) -> str:
     return h.hexdigest()
 
 
-def _looks_like_image_ref(s: str) -> bool:
+def _looks_like_media_ref(s: str) -> bool:
     """
-    Additional Photos sheet me "Photo" column often contains labels (not paths).
-    We only accept:
-      - URLs
-      - strings containing "/" (Drive rel path)
-      - strings ending with image extensions
+    Accept URLs + Drive rel paths + image-looking names.
+    (We now also allow PDFs via URL or rel path; analyze_media will byte-sniff.)
     """
     ss = (s or "").strip()
     if not ss:
@@ -37,14 +35,10 @@ def _looks_like_image_ref(s: str) -> bool:
         return True
     if "/" in ss:
         return True
-    return bool(_IMG_EXT_RX.search(ss))
+    return bool(_IMG_EXT_RX.search(ss)) or ss.lower().endswith(".pdf")
 
 
 def _collect_photo_cells_from_additional_rows(rows: List[Dict[str, Any]]) -> List[str]:
-    """
-    Rows are dicts keyed by casefold headers.
-    We'll pick columns starting with "photo" but filter only image-like refs.
-    """
     refs: List[str] = []
     for r in rows or []:
         for k, v in (r or {}).items():
@@ -56,20 +50,39 @@ def _collect_photo_cells_from_additional_rows(rows: List[Dict[str, Any]]) -> Lis
                 if not cell:
                     continue
                 for ref in split_cell_refs(cell):
-                    if _looks_like_image_ref(ref):
+                    if _looks_like_media_ref(ref):
                         refs.append(ref)
     return refs
 
 
+def _sniff_mime(data: bytes) -> str:
+    if not data:
+        return ""
+    b = data
+    if b.startswith(b"%PDF"):
+        return "application/pdf"
+    if b[:3] == b"\xFF\xD8\xFF":
+        return "image/jpeg"
+    if b.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _is_image_mime(m: str) -> bool:
+    return (m or "").startswith("image/")
+
+
 def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    CHECKIN images + Additional photos:
+    CHECKIN media + Additional photos:
       - resolve to bytes (Drive prefix map supported)
-      - caption + defect detect
+      - image: caption + defect detect (+ optional annotated upload)
+      - pdf: store artifact + add to captions list (no OCR here; lightweight)
       - store artifacts idempotently (by source_hash)
       - append MEDIA OBSERVATIONS into thread_snapshot_text
     """
-    # If you want this for more event types later, relax this check.
     if (state.get("event_type") or "") != "CHECKIN_CREATED":
         (state.get("logs") or []).append("analyze_media: skipped (not CHECKIN_CREATED)")
         return state
@@ -79,10 +92,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     run_id = (state.get("run_id") or "").strip()
     if not tenant_id or not checkin_id or not run_id:
         (state.get("logs") or []).append("analyze_media: skipped (missing tenant/checkin/run_id)")
-        return state
-
-    if not getattr(settings, "vision_api_key", "").strip():
-        (state.get("logs") or []).append("analyze_media: skipped (VISION_API_KEY not set)")
         return state
 
     sheets = SheetsTool(settings)
@@ -96,12 +105,17 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         checkin_id=checkin_id,
         artifact_type="IMAGE_CAPTION",
     )
+    existing_pdf_hashes = db.existing_artifact_source_hashes(
+        tenant_id=tenant_id,
+        checkin_id=checkin_id,
+        artifact_type="PDF_ATTACHMENT",
+    )
 
-    # 1) main checkin image cell
+    # 1) main checkin image cell (can contain URLs/paths)
     checkin_row = state.get("checkin_row") or {}
     col_img = sheets.map.col("checkin", "inspection_image_url")
     img_cell = _norm_value(checkin_row.get(_key(col_img), ""))
-    main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_image_ref(r)]
+    main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_media_ref(r)]
 
     # 2) additional photos from separate spreadsheet/tab
     add_refs: List[str] = []
@@ -116,7 +130,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         add_refs = []
 
     # Dedup + cap
-    refs = []
+    refs: List[str] = []
     seen = set()
     for r in (main_refs or []) + (add_refs or []):
         rr = (r or "").strip()
@@ -125,10 +139,14 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             seen.add(rr)
 
     if not refs:
-        (state.get("logs") or []).append("analyze_media: no image refs (main + additional empty)")
+        (state.get("logs") or []).append("analyze_media: no media refs (main + additional empty)")
         return state
 
     refs = refs[:12]
+
+    if not getattr(settings, "vision_api_key", "").strip():
+        (state.get("logs") or []).append("analyze_media: skipped (VISION_API_KEY not set)")
+        return state
 
     vision = VisionTool(
         api_key=getattr(settings, "vision_api_key", ""),
@@ -147,12 +165,8 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
 
     for ref in refs:
-        att = resolver.resolve(ref)
+        att: Optional[ResolvedAttachment] = resolver.resolve(ref)
         if not att:
-            continue
-
-        # process only images
-        if not getattr(att, "is_image", False):
             continue
 
         data = resolver.fetch_bytes(att)
@@ -161,16 +175,51 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
         source_hash = _sha256(data)
 
+        # Determine mime (Drive share links often have empty mime)
+        mime = (att.mime_type or "").strip()
+        if not mime:
+            mime = _sniff_mime(data) or "application/octet-stream"
+
+        is_pdf = (mime == "application/pdf") or (att.name or "").lower().endswith(".pdf")
+        is_img = _is_image_mime(mime)
+
+        # --- PDF handling (lightweight; no OCR) ---
+        if is_pdf:
+            if source_hash in existing_pdf_hashes:
+                continue
+
+            db.insert_artifact(
+                run_id=run_id,
+                artifact_type="PDF_ATTACHMENT",
+                url=att.source_ref or att.rel_path or "unknown",
+                meta={
+                    "tenant_id": tenant_id,
+                    "checkin_id": checkin_id,
+                    "source_ref": att.source_ref,
+                    "source_hash": source_hash,
+                    "file_name": att.name,
+                    "mime_type": mime,
+                },
+            )
+            existing_pdf_hashes.add(source_hash)
+
+            # also add to captions list so MEDIA vector can include it
+            pdf_line = f"PDF: {att.name or 'attachment'} (no text extracted)"
+            new_captions.append(pdf_line)
+            media_notes.append(f"- Doc: {pdf_line}")
+            continue
+
+        # --- Image handling ---
+        if not is_img:
+            continue
+
         # Caption idempotency per image (across runs)
         if source_hash in existing_caption_hashes:
             continue
 
-        mime = (att.mime_type or "").strip() or "image/jpeg"
-
-        # 1) caption
         caption = vision.caption_for_retrieval(
             image_bytes=data,
-            mime_type=mime,
+            mime_type=mime if mime.startswith("image/") else "image/jpeg",
             context_hint=context_hint,
         ).strip()
 
@@ -194,10 +243,9 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         if caption:
             new_captions.append(caption)
 
-        # 2) defect detect + annotated upload (optional)
         dout = vision.detect_defects(
             image_bytes=data,
-            mime_type=mime,
+            mime_type=mime if mime.startswith("image/") else "image/jpeg",
             context_hint=context_hint,
         )
         defects = dout.get("defects") or []
@@ -232,7 +280,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 annotated_urls.append(url)
 
-        # snapshot notes
         if caption:
             if defects:
                 labels = ", ".join([str(d.get("label") or "defect") for d in defects[:5]])
@@ -252,6 +299,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         state["thread_snapshot_text"] = (snap + "\n\n" + note_block).strip()
 
     (state.get("logs") or []).append(
-        f"analyze_media: done refs={len(refs)} captions={len(new_captions)} annotated={len(annotated_urls)}"
+        f"analyze_media: done refs={len(refs)} captions={len([c for c in new_captions if not str(c).startswith('PDF:')])} pdfs={len([c for c in new_captions if str(c).startswith('PDF:')])} annotated={len(annotated_urls)}"
     )
     return state

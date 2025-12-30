@@ -1,3 +1,4 @@
+# service/app/pipeline/graph.py
 from __future__ import annotations
 
 import importlib
@@ -6,8 +7,8 @@ import time
 from typing import Any, Callable, Dict, List
 
 from ..config import Settings
-from .ingest.run_log import RunLog
 from ..logctx import run_id_var
+from .ingest.run_log import RunLog
 
 logger = logging.getLogger("zai.graph")
 
@@ -42,8 +43,35 @@ def _tenant_from_payload(payload: Dict[str, Any]) -> str:
     return str(rmeta.get("tenant_id") or "")
 
 
-# ✅ Your requirement: only run full pipeline for CheckIN created
+def _meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    m = payload.get("meta") or {}
+    return m if isinstance(m, dict) else {}
+
+
+def _truthy(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return x != 0
+    if isinstance(x, str):
+        return x.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(x)
+
+
+# ✅ only run pipeline for checkin created
 _ALLOWED_EVENT_TYPES = {"CHECKIN_CREATED"}
+
+
+def _clean_lines(items: List[Any], *, max_items: int) -> List[str]:
+    out: List[str] = []
+    for x in items or []:
+        s = str(x or "").strip()
+        if not s:
+            continue
+        out.append(s)
+        if len(out) >= max_items:
+            break
+    return out
 
 
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -94,6 +122,10 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                 "logs": state.get("logs"),
             }
 
+        m = _meta(payload)
+        ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply"))
+        media_only = _truthy(m.get("media_only"))
+
         state = _timed("load_sheet_data", load_sheet_data)
 
         tenant_id = str(state.get("tenant_id") or "").strip()
@@ -103,16 +135,92 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         state = _timed("build_thread_snapshot", build_thread_snapshot)
         state = _timed("analyze_media", analyze_media)
 
-        # ✅ Retrieve BEFORE upsert (avoid self match)
+        # ✅ ingest-only modes
+        if ingest_only:
+            # media-only: caption artifacts already stored in analyze_media
+            if media_only:
+                caps = state.get("image_captions") or []
+                cap_lines = _clean_lines(caps, max_items=12)
+                if not cap_lines:
+                    (state.get("logs") or []).append("ingest_only(media_only): no captions found; skipping MEDIA vector")
+                    runlog.success(run_id)
+                    return {
+                        "run_id": run_id,
+                        "ok": True,
+                        "primary_id": primary_id,
+                        "event_type": event_type,
+                        "ingest_only": True,
+                        "media_only": True,
+                        "media_upserted": False,
+                        "logs": state.get("logs"),
+                    }
+
+                from ..tools.embed_tool import EmbedTool
+                from ..tools.vector_tool import VectorTool
+
+                checkin_id = str(state.get("checkin_id") or "").strip()
+                if not tenant_id or not checkin_id:
+                    (state.get("logs") or []).append("ingest_only(media_only): missing tenant/checkin; cannot upsert")
+                    runlog.success(run_id)
+                    return {
+                        "run_id": run_id,
+                        "ok": True,
+                        "primary_id": primary_id,
+                        "event_type": event_type,
+                        "ingest_only": True,
+                        "media_only": True,
+                        "media_upserted": False,
+                        "logs": state.get("logs"),
+                    }
+
+                media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
+
+                emb = EmbedTool(settings).embed_text(media_text)
+                VectorTool(settings).upsert_incident_vector(
+                    tenant_id=tenant_id,
+                    checkin_id=checkin_id,
+                    vector_type="MEDIA",
+                    embedding=emb,
+                    project_name=state.get("project_name"),
+                    part_number=state.get("part_number"),
+                    legacy_id=state.get("legacy_id"),
+                    status=state.get("checkin_status") or "",
+                    text=media_text,
+                )
+                (state.get("logs") or []).append(f"ingest_only(media_only): upserted MEDIA vector (captions={len(cap_lines)})")
+
+                runlog.success(run_id)
+                return {
+                    "run_id": run_id,
+                    "ok": True,
+                    "primary_id": primary_id,
+                    "event_type": event_type,
+                    "ingest_only": True,
+                    "media_only": True,
+                    "media_upserted": True,
+                    "logs": state.get("logs"),
+                }
+
+            # full ingest-only: store vectors but do NOT do retrieval / reply / writeback
+            state = _timed("upsert_vectors", upsert_vectors)
+            runlog.success(run_id)
+            logger.info("SUCCESS(ingest_only) primary_id=%s", primary_id)
+            return {
+                "run_id": run_id,
+                "ok": True,
+                "primary_id": primary_id,
+                "event_type": event_type,
+                "ingest_only": True,
+                "logs": state.get("logs"),
+            }
+
+        # normal pipeline
         state = _timed("retrieve_context", retrieve_context)
         state = _timed("rerank_context", rerank_context)
         state = _timed("generate_ai_reply", generate_ai_reply)
 
-        # ✅ Store vectors after reply
         state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("writeback", writeback)
-
-
 
         runlog.success(run_id)
         logger.info("SUCCESS primary_id=%s", primary_id)

@@ -1,7 +1,8 @@
+# service/app/tools/attachment_tool.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 import re
 import mimetypes
 import requests
@@ -52,8 +53,8 @@ class AttachmentResolver:
     """
     Resolves:
       - direct URLs (http/https) -> download via requests
-      - Drive URLs -> extract file id (best-effort) -> download via Drive API later (optional)
-      - Drive relative paths under GOOGLE_DRIVE_ROOT_FOLDER_ID -> resolve via DriveTool
+      - Drive URLs -> extract file id -> download via Drive API (if SA has access)
+      - Drive relative paths under configured roots -> resolve via DriveTool
     """
 
     def __init__(self, drive: DriveTool):
@@ -68,6 +69,8 @@ class AttachmentResolver:
         if _looks_like_url(raw):
             did = _extract_drive_id(raw)
             if did:
+                # ✅ Important: drive share links don't carry extensions/mime.
+                # We keep mime/is_image/is_pdf unknown here; analyze_media will byte-sniff after download.
                 return ResolvedAttachment(
                     source_ref=raw,
                     kind="drive_id",
@@ -78,21 +81,17 @@ class AttachmentResolver:
                     drive_file_id=did,
                 )
 
-            mime = ""
             name = raw.split("/")[-1] if "/" in raw else raw
             mt = _guess_mime_from_name(name)
-            if mt:
-                mime = mt
-
             low = name.lower()
-            is_pdf = low.endswith(".pdf") or mime == "application/pdf"
-            is_img = (mime.startswith("image/") if mime else False) or low.endswith((".png", ".jpg", ".jpeg", ".webp"))
+            is_pdf = low.endswith(".pdf") or mt == "application/pdf"
+            is_img = (mt.startswith("image/") if mt else False) or low.endswith((".png", ".jpg", ".jpeg", ".webp"))
 
             return ResolvedAttachment(
                 source_ref=raw,
                 kind="url",
                 name=name,
-                mime_type=mime,
+                mime_type=mt,
                 is_pdf=is_pdf,
                 is_image=is_img,
                 direct_url=raw,
@@ -110,7 +109,7 @@ class AttachmentResolver:
                 root_override = fid
                 rel = rest
             else:
-                # prefix present in path but not configured => skip for now (your requirement)
+                # prefix present in path but not configured => mark unknown (caller decides)
                 name = raw.split("/")[-1] if "/" in raw else raw
                 mt = _guess_mime_from_name(name)
                 low = name.lower()
@@ -159,6 +158,7 @@ class AttachmentResolver:
             drive_file_id=item.file_id,
             rel_path=raw,
         )
+
     def fetch_bytes(self, att: ResolvedAttachment, *, timeout: int = 40) -> Optional[bytes]:
         if not att:
             return None

@@ -1,3 +1,4 @@
+# service/app/main.py
 from __future__ import annotations
 
 import uuid
@@ -14,6 +15,7 @@ from .queue import enqueue_job
 from .pipeline.graph import run_event_graph
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
+from .pipeline.ingest.dashboard_ingest import ingest_dashboard  # ✅ WIRED
 from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 from .schemas.webhook import WebhookPayload
@@ -24,6 +26,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
 setup_logging()
 import logging
+
 logger = logging.getLogger("zai")
 
 
@@ -110,9 +113,16 @@ def admin_trigger(request: Request, payload: WebhookPayload):
 @app.post("/admin/ingest")
 def admin_ingest(
     request: Request,
-    source: Literal["projects", "ccp", "history", "all"] = "all",
+    source: Literal["projects", "ccp", "history", "dashboard", "media", "all"] = "all",
     limit: int = 500,
 ):
+    """
+    Bulk backfill:
+      - history: PROBLEM/RESOLUTION vectors (fast)
+      - dashboard: dashboard_vectors
+      - ccp: ccp_vectors
+      - media: IMAGE_CAPTION artifacts + MEDIA vectors (via ingest-only pipeline; no AI reply/writeback)
+    """
     settings = _get_settings(request)
     results: Dict[str, Any] = {}
 
@@ -121,6 +131,59 @@ def admin_ingest(
 
     if source in ("history", "all"):
         results["history"] = ingest_history(settings, limit=limit)
+
+    if source in ("dashboard", "all"):
+        # reuse same limit (dashboard_ingest supports its own defaults too)
+        results["dashboard"] = ingest_dashboard(settings, limit=max(1, int(limit)))
+
+    if source in ("media", "all"):
+        # ✅ bulk captioning + MEDIA vectors (no reply/writeback)
+        from .tools.sheets_tool import SheetsTool, _key, _norm_value  # local import to keep startup light
+
+        sheets = SheetsTool(settings)
+        col_checkin_id = sheets.map.col("checkin", "checkin_id")
+        k_checkin_id = _key(col_checkin_id)
+
+        rows = sheets.list_checkins()
+        if limit and limit > 0:
+            rows = rows[:limit]
+
+        seen = 0
+        ok = 0
+        err = 0
+        err_samples: list[dict[str, str]] = []
+
+        for r in rows:
+            seen += 1
+            checkin_id = _norm_value((r or {}).get(k_checkin_id, ""))
+            if not checkin_id:
+                continue
+
+            out = run_event_graph(
+                settings,
+                {
+                    "event_type": "CHECKIN_CREATED",
+                    "checkin_id": checkin_id,
+                    "meta": {"ingest_only": True, "media_only": True},
+                },
+            )
+            if out.get("ok"):
+                ok += 1
+            else:
+                err += 1
+                if len(err_samples) < 20:
+                    err_samples.append(
+                        {"checkin_id": checkin_id, "error": str(out.get("error") or "")[:300]}
+                    )
+
+        results["media"] = {
+            "source": "media",
+            "rows_seen": seen,
+            "runs_ok": ok,
+            "runs_error": err,
+            "error_samples": err_samples,
+            "note": "Uses ingest-only pipeline: load_sheet_data -> build_thread_snapshot -> analyze_media -> upsert MEDIA vector.",
+        }
 
     if source == "projects":
         results["projects"] = {"note": "No separate projects table in MVP; we look up Project row on-demand."}
