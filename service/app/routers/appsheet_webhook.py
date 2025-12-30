@@ -6,7 +6,8 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from ..config import Settings
 from ..queue import enqueue_job
 from ..schemas.webhook import WebhookPayload
-
+from redis.exceptions import ConnectionError as RedisConnectionError
+from fastapi import HTTPException
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
@@ -19,9 +20,16 @@ def _require_secret(settings: Settings, provided: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
+
+
 def _enqueue(settings: Settings, payload: WebhookPayload) -> dict:
-    job_id = enqueue_job(settings, payload.model_dump(exclude_none=True))
-    return {"ok": True, "job_id": job_id}
+    try:
+        job_id = enqueue_job(settings, payload.model_dump(exclude_none=True))
+        return {"ok": True, "job_id": job_id}
+    except RedisConnectionError as e:
+        # Apps Script can retry later
+        raise HTTPException(status_code=503, detail=f"Redis overloaded: {e}")
+
 
 
 @router.post("/sheets")
