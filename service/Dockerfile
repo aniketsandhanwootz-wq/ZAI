@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY service/app /app/app
 COPY packages /app/packages
 
+# Keep legacy absolute path working (/packages/...)
+RUN ln -s /app/packages /packages
+
 EXPOSE 8000
 
 # Run API (consumer starts inside startup because RUN_CONSUMER=1)
