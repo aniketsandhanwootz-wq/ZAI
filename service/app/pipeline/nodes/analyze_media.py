@@ -1,4 +1,3 @@
-# service/app/pipeline/nodes/analyze_media.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -26,7 +25,7 @@ def _sha256(b: bytes) -> str:
 def _looks_like_media_ref(s: str) -> bool:
     """
     Accept URLs + Drive rel paths + image-looking names.
-    (We now also allow PDFs via URL or rel path; analyze_media will byte-sniff.)
+    We also allow PDFs via URL or rel path; we'll byte-sniff after download.
     """
     ss = (s or "").strip()
     if not ss:
@@ -76,15 +75,21 @@ def _is_image_mime(m: str) -> bool:
 
 def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    CHECKIN media + Additional photos:
-      - resolve to bytes (Drive prefix map supported)
-      - image: caption + defect detect (+ optional annotated upload)
-      - pdf: store artifact + add to captions list (no OCR here; lightweight)
+    Checkin media ingestion (incremental-safe):
+      - CheckIN inspection image URL
+      - Conversation.Photo (NEW)
+      - Additional photos sheet
+    For each ref:
+      - download bytes (supports Drive id + drive paths)
+      - byte-sniff mime
+      - Image => caption + defect detect (+ optional annotated upload)
+      - PDF => store PDF_ATTACHMENT + add a "PDF:" entry into captions list
       - store artifacts idempotently (by source_hash)
       - append MEDIA OBSERVATIONS into thread_snapshot_text
     """
-    if (state.get("event_type") or "") != "CHECKIN_CREATED":
-        (state.get("logs") or []).append("analyze_media: skipped (not CHECKIN_CREATED)")
+    allowed = {"CHECKIN_CREATED", "CHECKIN_UPDATED", "CONVERSATION_ADDED"}
+    if (state.get("event_type") or "") not in allowed:
+        (state.get("logs") or []).append(f"analyze_media: skipped (event_type not in {sorted(allowed)})")
         return state
 
     tenant_id = (state.get("tenant_id") or "").strip()
@@ -99,7 +104,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     resolver = AttachmentResolver(drive)
     db = DBTool(settings.database_url)
 
-    # Prefetch existing caption hashes for idempotency
     existing_caption_hashes = db.existing_artifact_source_hashes(
         tenant_id=tenant_id,
         checkin_id=checkin_id,
@@ -111,13 +115,26 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         artifact_type="PDF_ATTACHMENT",
     )
 
-    # 1) main checkin image cell (can contain URLs/paths)
+    # CheckIN inspection image cell
     checkin_row = state.get("checkin_row") or {}
     col_img = sheets.map.col("checkin", "inspection_image_url")
     img_cell = _norm_value(checkin_row.get(_key(col_img), ""))
     main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_media_ref(r)]
 
-    # 2) additional photos from separate spreadsheet/tab
+    # Conversation.Photo refs (NEW)
+    convo_refs: List[str] = []
+    try:
+        col_convo_photo = sheets.map.col("conversation", "photos")
+        k_convo_photo = _key(col_convo_photo)
+        for cr in (state.get("conversation_rows") or [])[-50:]:
+            cell = _norm_value((cr or {}).get(k_convo_photo, ""))
+            for ref in split_cell_refs(cell):
+                if _looks_like_media_ref(ref):
+                    convo_refs.append(ref)
+    except Exception as e:
+        (state.get("logs") or []).append(f"analyze_media: conversation photo parse failed (non-fatal): {e}")
+
+    # Additional photos sheet
     add_refs: List[str] = []
     try:
         add_sheet_id = getattr(settings, "additional_photos_spreadsheet_id", "") or ""
@@ -132,14 +149,14 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     # Dedup + cap
     refs: List[str] = []
     seen = set()
-    for r in (main_refs or []) + (add_refs or []):
+    for r in (main_refs or []) + (convo_refs or []) + (add_refs or []):
         rr = (r or "").strip()
         if rr and rr not in seen:
             refs.append(rr)
             seen.add(rr)
 
     if not refs:
-        (state.get("logs") or []).append("analyze_media: no media refs (main + additional empty)")
+        (state.get("logs") or []).append("analyze_media: no media refs found")
         return state
 
     refs = refs[:12]
@@ -175,19 +192,13 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
         source_hash = _sha256(data)
 
-        # Determine mime (Drive share links often have empty mime)
-        mime = (att.mime_type or "").strip()
-        if not mime:
-            mime = _sniff_mime(data) or "application/octet-stream"
-
+        mime = (att.mime_type or "").strip() or _sniff_mime(data) or "application/octet-stream"
         is_pdf = (mime == "application/pdf") or (att.name or "").lower().endswith(".pdf")
         is_img = _is_image_mime(mime)
 
-        # --- PDF handling (lightweight; no OCR) ---
         if is_pdf:
             if source_hash in existing_pdf_hashes:
                 continue
-
             db.insert_artifact(
                 run_id=run_id,
                 artifact_type="PDF_ATTACHMENT",
@@ -202,18 +213,14 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 },
             )
             existing_pdf_hashes.add(source_hash)
-
-            # also add to captions list so MEDIA vector can include it
             pdf_line = f"PDF: {att.name or 'attachment'} (no text extracted)"
             new_captions.append(pdf_line)
             media_notes.append(f"- Doc: {pdf_line}")
             continue
 
-        # --- Image handling ---
         if not is_img:
             continue
 
-        # Caption idempotency per image (across runs)
         if source_hash in existing_caption_hashes:
             continue
 

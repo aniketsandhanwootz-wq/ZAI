@@ -1,4 +1,3 @@
-# service/app/pipeline/graph.py
 from __future__ import annotations
 
 import importlib
@@ -28,6 +27,7 @@ def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
     )
 
 
+# Checkin pipeline nodes
 load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
@@ -58,8 +58,14 @@ def _truthy(x: Any) -> bool:
     return bool(x)
 
 
-# ✅ only run pipeline for checkin created
-_ALLOWED_EVENT_TYPES = {"CHECKIN_CREATED"}
+_ALLOWED_EVENT_TYPES = {
+    "CHECKIN_CREATED",
+    "CHECKIN_UPDATED",
+    "CONVERSATION_ADDED",
+    "CCP_UPDATED",
+    "DASHBOARD_UPDATED",
+    "MANUAL_TRIGGER",
+}
 
 
 def _clean_lines(items: List[Any], *, max_items: int) -> List[str]:
@@ -87,7 +93,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
     runlog = RunLog(settings)
     tenant_id_hint = (_tenant_from_payload(payload) or "UNKNOWN").strip()
     run_id = runlog.start(tenant_id_hint, event_type, primary_id)
-
     token = run_id_var.set(run_id)
 
     state: State = {
@@ -107,7 +112,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         return out
 
     try:
-        # ✅ HARD GATE
         if event_type not in _ALLOWED_EVENT_TYPES:
             msg = f"Skipping pipeline for event_type='{event_type}' (allowed={sorted(_ALLOWED_EVENT_TYPES)})"
             (state.get("logs") or []).append(msg)
@@ -123,7 +127,47 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             }
 
         m = _meta(payload)
-        ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply"))
+
+        # -------------------------
+        # CCP incremental ingestion
+        # -------------------------
+        if event_type == "CCP_UPDATED":
+            ccp_id = str(payload.get("ccp_id") or "").strip()
+            if not ccp_id:
+                runlog.success(run_id)
+                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing ccp_id", "logs": state.get("logs")}
+
+            from .ingest.ccp_ingest import ingest_ccp_one
+
+            out = ingest_ccp_one(settings, ccp_id=ccp_id)
+            runlog.success(run_id)
+            return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
+
+        # ------------------------------
+        # Dashboard incremental ingestion
+        # ------------------------------
+        if event_type == "DASHBOARD_UPDATED":
+            legacy_id = str(payload.get("legacy_id") or "").strip()
+            if not legacy_id:
+                runlog.success(run_id)
+                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing legacy_id", "logs": state.get("logs")}
+
+            from .ingest.dashboard_ingest import ingest_dashboard_one
+
+            out = ingest_dashboard_one(settings, legacy_id=legacy_id)
+            runlog.success(run_id)
+            return {"run_id": run_id, "ok": True, "event_type": event_type, "legacy_id": legacy_id, "result": out, "logs": state.get("logs")}
+
+        # -------------------------
+        # Checkin / Conversation flow
+        # -------------------------
+        # Reply/writeback ONLY for CHECKIN_CREATED (your requirement)
+        force_reply = _truthy(m.get("force_reply"))
+        ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
+        ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
+        if event_type == "CHECKIN_CREATED" and force_reply:
+            ingest_only = False
+
         media_only = _truthy(m.get("media_only"))
 
         state = _timed("load_sheet_data", load_sheet_data)
@@ -135,9 +179,8 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         state = _timed("build_thread_snapshot", build_thread_snapshot)
         state = _timed("analyze_media", analyze_media)
 
-        # ✅ ingest-only modes
+        # ingest-only modes
         if ingest_only:
-            # media-only: caption artifacts already stored in analyze_media
             if media_only:
                 caps = state.get("image_captions") or []
                 cap_lines = _clean_lines(caps, max_items=12)
@@ -174,7 +217,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     }
 
                 media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
-
                 emb = EmbedTool(settings).embed_text(media_text)
                 VectorTool(settings).upsert_incident_vector(
                     tenant_id=tenant_id,
@@ -201,7 +243,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "logs": state.get("logs"),
                 }
 
-            # full ingest-only: store vectors but do NOT do retrieval / reply / writeback
             state = _timed("upsert_vectors", upsert_vectors)
             runlog.success(run_id)
             logger.info("SUCCESS(ingest_only) primary_id=%s", primary_id)
@@ -214,11 +255,23 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                 "logs": state.get("logs"),
             }
 
-        # normal pipeline
+        # normal pipeline (reply/writeback happens only for CHECKIN_CREATED)
+        if event_type != "CHECKIN_CREATED":
+            # safety: even if caller didn't set ingest_only, we won't reply for other events
+            state = _timed("upsert_vectors", upsert_vectors)
+            runlog.success(run_id)
+            return {
+                "run_id": run_id,
+                "ok": True,
+                "primary_id": primary_id,
+                "event_type": event_type,
+                "note": "Non-created event: vectors refreshed, no reply/writeback.",
+                "logs": state.get("logs"),
+            }
+
         state = _timed("retrieve_context", retrieve_context)
         state = _timed("rerank_context", rerank_context)
         state = _timed("generate_ai_reply", generate_ai_reply)
-
         state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("writeback", writeback)
 

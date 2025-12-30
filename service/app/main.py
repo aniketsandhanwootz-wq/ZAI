@@ -1,21 +1,19 @@
-# service/app/main.py
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Optional, Literal, Dict, Any
+from typing import Dict, Any, Literal
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request
 
 from .config import load_settings, Settings
 from .consumer import start_consumer_thread
-from .queue import enqueue_job
 from .pipeline.graph import run_event_graph
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
-from .pipeline.ingest.dashboard_ingest import ingest_dashboard  # ✅ WIRED
+from .pipeline.ingest.dashboard_ingest import ingest_dashboard
 from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 from .schemas.webhook import WebhookPayload
@@ -89,20 +87,6 @@ def health(request: Request) -> dict:
     }
 
 
-# Legacy endpoint kept (optional). Prefer /webhooks/sheets or /webhooks/appsheet.
-@app.post("/webhook/appsheet")
-def appsheet_webhook_legacy(
-    request: Request,
-    payload: WebhookPayload,
-    x_appsheet_secret: Optional[str] = Header(default=None),
-):
-    settings = _get_settings(request)
-    if x_appsheet_secret != settings.appsheet_webhook_secret:
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
-    job_id = enqueue_job(settings, payload.model_dump())
-    return {"ok": True, "job_id": job_id, "note": "legacy path; prefer /webhooks/sheets"}
-
-
 @app.post("/admin/trigger")
 def admin_trigger(request: Request, payload: WebhookPayload):
     settings = _get_settings(request)
@@ -118,10 +102,10 @@ def admin_ingest(
 ):
     """
     Bulk backfill:
-      - history: PROBLEM/RESOLUTION vectors (fast)
+      - history: PROBLEM/RESOLUTION vectors
       - dashboard: dashboard_vectors
       - ccp: ccp_vectors
-      - media: IMAGE_CAPTION artifacts + MEDIA vectors (via ingest-only pipeline; no AI reply/writeback)
+      - media: IMAGE_CAPTION artifacts + MEDIA vectors (ingest-only pipeline)
     """
     settings = _get_settings(request)
     results: Dict[str, Any] = {}
@@ -133,12 +117,10 @@ def admin_ingest(
         results["history"] = ingest_history(settings, limit=limit)
 
     if source in ("dashboard", "all"):
-        # reuse same limit (dashboard_ingest supports its own defaults too)
         results["dashboard"] = ingest_dashboard(settings, limit=max(1, int(limit)))
 
     if source in ("media", "all"):
-        # ✅ bulk captioning + MEDIA vectors (no reply/writeback)
-        from .tools.sheets_tool import SheetsTool, _key, _norm_value  # local import to keep startup light
+        from .tools.sheets_tool import SheetsTool, _key, _norm_value
 
         sheets = SheetsTool(settings)
         col_checkin_id = sheets.map.col("checkin", "checkin_id")
@@ -162,7 +144,7 @@ def admin_ingest(
             out = run_event_graph(
                 settings,
                 {
-                    "event_type": "CHECKIN_CREATED",
+                    "event_type": "CHECKIN_UPDATED",
                     "checkin_id": checkin_id,
                     "meta": {"ingest_only": True, "media_only": True},
                 },
@@ -172,9 +154,7 @@ def admin_ingest(
             else:
                 err += 1
                 if len(err_samples) < 20:
-                    err_samples.append(
-                        {"checkin_id": checkin_id, "error": str(out.get("error") or "")[:300]}
-                    )
+                    err_samples.append({"checkin_id": checkin_id, "error": str(out.get("error") or "")[:300]})
 
         results["media"] = {
             "source": "media",
@@ -182,7 +162,7 @@ def admin_ingest(
             "runs_ok": ok,
             "runs_error": err,
             "error_samples": err_samples,
-            "note": "Uses ingest-only pipeline: load_sheet_data -> build_thread_snapshot -> analyze_media -> upsert MEDIA vector.",
+            "note": "Uses ingest-only media-only pipeline (captions + MEDIA vector).",
         }
 
     if source == "projects":

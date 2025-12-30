@@ -15,33 +15,25 @@ def _get_settings(request: Request) -> Settings:
 
 
 def _require_secret(settings: Settings, provided: Optional[str]) -> None:
-    if (provided or "") != (settings.appsheet_webhook_secret or ""):
+    if (provided or "") != (settings.webhook_secret or ""):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 
 def _enqueue(settings: Settings, payload: WebhookPayload) -> dict:
-    job_id = enqueue_job(settings, payload.model_dump())
+    job_id = enqueue_job(settings, payload.model_dump(exclude_none=True))
     return {"ok": True, "job_id": job_id}
 
 
-@router.post("/appsheet")
-def appsheet_webhook(
-    request: Request,
-    payload: WebhookPayload,
-    x_appsheet_secret: Optional[str] = Header(default=None),
-):
-    settings = _get_settings(request)
-    _require_secret(settings, x_appsheet_secret)
-    return _enqueue(settings, payload)
-
-
-# ✅ New: Google Sheets trigger endpoint
 @router.post("/sheets")
 def sheets_webhook(
     request: Request,
     payload: WebhookPayload,
     x_sheets_secret: Optional[str] = Header(default=None),
 ):
+    """
+    Apps Script -> FastAPI entrypoint.
+    Send event_type + identifiers; we enqueue and the worker runs graph routing.
+    """
     settings = _get_settings(request)
     _require_secret(settings, x_sheets_secret)
     return _enqueue(settings, payload)

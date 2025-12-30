@@ -17,10 +17,6 @@ _DRIVE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
 
 
 def _is_valid_drive_id(v: str) -> bool:
-    """
-    Drive file/folder ids are typically URL-safe base64-ish strings.
-    This rejects placeholders like <<folderId>> and obvious garbage.
-    """
     s = (v or "").strip()
     if not s:
         return False
@@ -45,7 +41,6 @@ def _parse_prefix_map(raw: str) -> Dict[str, str]:
             vv = str(v or "").strip()
             if not kk or not vv:
                 continue
-            # ✅ Ignore placeholders / invalid IDs so ingestion doesn't crash
             if not _is_valid_drive_id(vv):
                 continue
             out[kk] = vv
@@ -71,20 +66,18 @@ class Settings:
     # Drive
     google_drive_root_folder_id: str
     google_drive_annotated_folder_id: str
-
-    # Prefix-based folder root overrides
     drive_prefix_map: Dict[str, str]
 
-    # Vision (image caption + boxes)
+    # Vision
     vision_provider: str
     vision_api_key: str
     vision_model: str
 
-    # Teams (single workflow/webhook endpoint; routing handled by payload)
+    # Teams
     teams_webhook_url: str
 
-    # Webhook security
-    appsheet_webhook_secret: str
+    # ✅ Single webhook secret for Apps Script
+    webhook_secret: str
 
     # LLM + embeddings
     llm_provider: str
@@ -103,7 +96,7 @@ class Settings:
     # Migrations toggle
     run_migrations: bool
 
-    # ---- Phase 2: Glide company context ----
+    # Glide
     glide_api_key: str
     glide_app_id: str
     glide_company_table: str
@@ -149,10 +142,12 @@ def load_settings() -> Settings:
     )
     additional_photos_tab_name = _get_env("ADDITIONAL_PHOTOS_TAB_NAME", "Checkin Additional photos")
 
-    # Prefix map
     drive_prefix_map = _parse_prefix_map(_get_env("DRIVE_PREFIX_MAP_JSON", ""))
 
-    # ---- Phase 2: Glide ----
+    # ✅ webhook secret: prefer WEBHOOK_SECRET; fallback to old APPSHEET_WEBHOOK_SECRET
+    webhook_secret = _get_env("WEBHOOK_SECRET", _get_env("APPSHEET_WEBHOOK_SECRET", ""), required=True)
+
+    # Glide
     glide_api_key = _get_env("GLIDE_API_KEY", "")
     glide_app_id = _get_env("GLIDE_APP_ID", "")
     glide_company_table = _get_env("GLIDE_COMPANY_TABLE", "")
@@ -168,7 +163,14 @@ def load_settings() -> Settings:
         google_service_account_json=sa_raw,
         additional_photos_spreadsheet_id=additional_photos_spreadsheet_id,
         additional_photos_tab_name=additional_photos_tab_name,
-        appsheet_webhook_secret=_get_env("APPSHEET_WEBHOOK_SECRET", required=True),
+        google_drive_root_folder_id=google_drive_root_folder_id,
+        google_drive_annotated_folder_id=google_drive_annotated_folder_id,
+        drive_prefix_map=drive_prefix_map,
+        vision_provider=vision_provider,
+        vision_api_key=vision_api_key,
+        vision_model=vision_model,
+        teams_webhook_url=teams_webhook_url,
+        webhook_secret=webhook_secret,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
         llm_model=llm_model,
@@ -179,13 +181,6 @@ def load_settings() -> Settings:
         run_consumer=run_consumer,
         consumer_queues=consumer_queues,
         run_migrations=run_migrations,
-        google_drive_root_folder_id=google_drive_root_folder_id,
-        google_drive_annotated_folder_id=google_drive_annotated_folder_id,
-        drive_prefix_map=drive_prefix_map,
-        vision_provider=vision_provider,
-        vision_api_key=vision_api_key,
-        vision_model=vision_model,
-        teams_webhook_url=teams_webhook_url,
         glide_api_key=glide_api_key,
         glide_app_id=glide_app_id,
         glide_company_table=glide_company_table,
