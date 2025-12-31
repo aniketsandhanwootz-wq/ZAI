@@ -1,14 +1,16 @@
+# service/app/consumer.py
 import logging
-import threading
-import time
 import os
 import socket
+import threading
+import time
 from uuid import uuid4
 
-from redis import Redis
-from rq import Worker, Queue
+from rq import Queue, Worker
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from .config import Settings
+from .redis_conn import get_redis
 
 logger = logging.getLogger("zai.consumer")
 
@@ -18,7 +20,6 @@ _consumer_started = False
 def start_consumer_thread(settings: Settings) -> None:
     """
     Runs an RQ worker inside the SAME web service process (MVP cost saver).
-    Set RUN_CONSUMER=0 if you later deploy a dedicated Render Worker.
     """
     global _consumer_started
     if _consumer_started:
@@ -31,28 +32,38 @@ def start_consumer_thread(settings: Settings) -> None:
 
 
 def _run_worker(settings: Settings) -> None:
-    redis_conn = Redis.from_url(settings.redis_url)
     queue_names = [q.strip() for q in settings.consumer_queues.split(",") if q.strip()]
+
+    # Reuse shared pool
+    redis_conn = get_redis(settings.redis_url)
     queues = [Queue(name, connection=redis_conn) for name in queue_names]
 
     while True:
         worker = None
         try:
-            # Unique worker name per retry so stale registrations don't collide
             worker_name = f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
             worker = Worker(queues, connection=redis_conn, name=worker_name)
 
             logger.info("worker.work() loop starting… name=%s queues=%s", worker_name, queue_names)
             worker.work(with_scheduler=False, burst=False)
 
+        except RedisConnectionError as e:
+            # Redis saturated / maxclients etc.
+            logger.exception("Redis connection error; retrying in 5s: %s", e)
+
+            # Close all pooled sockets so we don't keep stale connections around
+            try:
+                redis_conn.connection_pool.disconnect(inuse_connections=True)
+            except Exception:
+                pass
+
+            time.sleep(5)
+
         except Exception as e:
             logger.exception("worker crashed; retrying in 5s: %s", e)
-
-            # Best-effort cleanup if worker partially registered
             try:
                 if worker is not None:
                     worker.register_death()
             except Exception:
                 pass
-
             time.sleep(5)
