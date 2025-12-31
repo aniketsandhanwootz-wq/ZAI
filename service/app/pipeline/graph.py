@@ -35,6 +35,7 @@ upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", 
 retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
 rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
 generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
+annotate_media = _resolve_node(".nodes.annotate_media", ["annotate_media", "run", "node"])
 writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
 
 
@@ -272,6 +273,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         state = _timed("retrieve_context", retrieve_context)
         state = _timed("rerank_context", rerank_context)
         state = _timed("generate_ai_reply", generate_ai_reply)
+        state = _timed("annotate_media", annotate_media)
         state = _timed("upsert_vectors", upsert_vectors)
         state = _timed("writeback", writeback)
 

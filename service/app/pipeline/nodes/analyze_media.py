@@ -9,7 +9,6 @@ from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.drive_tool import DriveTool
 from ...tools.attachment_tool import AttachmentResolver, split_cell_refs, ResolvedAttachment
 from ...tools.vision_tool import VisionTool
-from ...tools.annotate_tool import AnnotateTool
 from ...tools.db_tool import DBTool
 
 
@@ -77,15 +76,20 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Checkin media ingestion (incremental-safe):
       - CheckIN inspection image URL
-      - Conversation.Photo (NEW)
+      - Conversation.Photo
       - Additional photos sheet
+
     For each ref:
       - download bytes (supports Drive id + drive paths)
       - byte-sniff mime
-      - Image => caption + defect detect (+ optional annotated upload)
+      - Image => caption (for vectors) + STORE image bytes into state["media_images"] for multimodal LLM
       - PDF => store PDF_ATTACHMENT + add a "PDF:" entry into captions list
       - store artifacts idempotently (by source_hash)
       - append MEDIA OBSERVATIONS into thread_snapshot_text
+
+    NOTE:
+      - Defect detection is NO LONGER done here.
+      - Defects are detected in main prompt (checkin_reply.md) and later annotated+uploaded by annotate_media node.
     """
     allowed = {"CHECKIN_CREATED", "CHECKIN_UPDATED", "CONVERSATION_ADDED"}
     if (state.get("event_type") or "") not in allowed:
@@ -104,11 +108,24 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     resolver = AttachmentResolver(drive)
     db = DBTool(settings.database_url)
 
-    existing_caption_hashes = db.existing_artifact_source_hashes(
-        tenant_id=tenant_id,
-        checkin_id=checkin_id,
-        artifact_type="IMAGE_CAPTION",
-    )
+    do_caption = bool(getattr(settings, "vision_api_key", "").strip())
+    vision: Optional[VisionTool] = None
+    if do_caption:
+        vision = VisionTool(
+            api_key=getattr(settings, "vision_api_key", ""),
+            model=getattr(settings, "vision_model", "gemini-2.0-flash"),
+        )
+    else:
+        (state.get("logs") or []).append("analyze_media: VISION_API_KEY not set -> captioning skipped, but images will be passed to LLM")
+
+    existing_caption_hashes = set()
+    if do_caption:
+        existing_caption_hashes = db.existing_artifact_source_hashes(
+            tenant_id=tenant_id,
+            checkin_id=checkin_id,
+            artifact_type="IMAGE_CAPTION",
+        )
+
     existing_pdf_hashes = db.existing_artifact_source_hashes(
         tenant_id=tenant_id,
         checkin_id=checkin_id,
@@ -121,7 +138,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     img_cell = _norm_value(checkin_row.get(_key(col_img), ""))
     main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_media_ref(r)]
 
-    # Conversation.Photo refs (NEW)
+    # Conversation.Photo refs
     convo_refs: List[str] = []
     try:
         col_convo_photo = sheets.map.col("conversation", "photos")
@@ -157,23 +174,14 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not refs:
         (state.get("logs") or []).append("analyze_media: no media refs found")
+        state["media_images"] = []
         return state
 
     refs = refs[:12]
 
-    if not getattr(settings, "vision_api_key", "").strip():
-        (state.get("logs") or []).append("analyze_media: skipped (VISION_API_KEY not set)")
-        return state
-
-    vision = VisionTool(
-        api_key=getattr(settings, "vision_api_key", ""),
-        model=getattr(settings, "vision_model", "gemini-2.0-flash"),
-    )
-    annot = AnnotateTool()
-
     media_notes: List[str] = []
     new_captions: List[str] = []
-    annotated_urls: List[str] = []
+    media_images: List[Dict[str, Any]] = []
 
     context_hint = (
         f"Project={state.get('project_name') or ''} | Part={state.get('part_number') or ''} | "
@@ -191,7 +199,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         source_hash = _sha256(data)
-
         mime = (att.mime_type or "").strip() or _sniff_mime(data) or "application/octet-stream"
         is_pdf = (mime == "application/pdf") or (att.name or "").lower().endswith(".pdf")
         is_img = _is_image_mime(mime)
@@ -221,81 +228,55 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         if not is_img:
             continue
 
-        if source_hash in existing_caption_hashes:
-            continue
-
-        caption = vision.caption_for_retrieval(
-            image_bytes=data,
-            mime_type=mime if mime.startswith("image/") else "image/jpeg",
-            context_hint=context_hint,
-        ).strip()
-
-        db.insert_artifact(
-            run_id=run_id,
-            artifact_type="IMAGE_CAPTION",
-            url=att.source_ref or att.rel_path or "unknown",
-            meta={
-                "tenant_id": tenant_id,
-                "checkin_id": checkin_id,
-                "source_ref": att.source_ref,
+        img_index = len(media_images)
+        media_images.append(
+            {
+                "image_index": img_index,
+                "mime_type": mime if mime.startswith("image/") else "image/jpeg",
+                "image_bytes": data,
+                "source_ref": att.source_ref or att.rel_path or "unknown",
+                "file_name": att.name or "",
                 "source_hash": source_hash,
-                "file_name": att.name,
-                "mime_type": mime,
-                "caption": caption,
-                "vision_model": getattr(settings, "vision_model", ""),
-            },
+            }
         )
-        existing_caption_hashes.add(source_hash)
 
-        if caption:
-            new_captions.append(caption)
+        caption = ""
 
-        dout = vision.detect_defects(
-            image_bytes=data,
-            mime_type=mime if mime.startswith("image/") else "image/jpeg",
-            context_hint=context_hint,
-        )
-        defects = dout.get("defects") or []
-        if not isinstance(defects, list):
-            defects = []
+        if do_caption and vision:
+            if source_hash not in existing_caption_hashes:
+                caption = vision.caption_for_retrieval(
+                    image_bytes=data,
+                    mime_type=mime if mime.startswith("image/") else "image/jpeg",
+                    context_hint=context_hint,
+                ).strip()
 
-        if defects:
-            annotated = annot.draw(data, defects)
-            fname = f"{source_hash[:10]}_{(att.name or 'image').replace(' ', '_')}.png"
-            up = drive.upload_annotated_bytes(
-                checkin_id=checkin_id,
-                file_name=fname,
-                content_bytes=annotated,
-                mime_type="image/png",
-                make_public=True,
-            )
-            url = up.get("webViewLink") or up.get("webContentLink") or ""
-            if url:
                 db.insert_artifact(
                     run_id=run_id,
-                    artifact_type="ANNOTATED_IMAGE",
-                    url=url,
+                    artifact_type="IMAGE_CAPTION",
+                    url=att.source_ref or att.rel_path or "unknown",
                     meta={
                         "tenant_id": tenant_id,
                         "checkin_id": checkin_id,
                         "source_ref": att.source_ref,
                         "source_hash": source_hash,
+                        "file_name": att.name,
+                        "mime_type": mime,
                         "caption": caption,
-                        "defects": defects,
                         "vision_model": getattr(settings, "vision_model", ""),
                     },
                 )
-                annotated_urls.append(url)
+                existing_caption_hashes.add(source_hash)
+
+                if caption:
+                    new_captions.append(caption)
 
         if caption:
-            if defects:
-                labels = ", ".join([str(d.get("label") or "defect") for d in defects[:5]])
-                media_notes.append(f"- Image: {caption} | defects: {labels}")
-            else:
-                media_notes.append(f"- Image: {caption} | defects: none obvious")
+            media_notes.append(f"- Image: {caption}")
+        else:
+            media_notes.append(f"- Image: {(att.name or 'image').strip()}")
 
-    if annotated_urls:
-        state["annotated_image_urls"] = annotated_urls
+    state["media_images"] = media_images
+
     if new_captions:
         state["image_captions"] = new_captions
 
@@ -306,6 +287,8 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         state["thread_snapshot_text"] = (snap + "\n\n" + note_block).strip()
 
     (state.get("logs") or []).append(
-        f"analyze_media: done refs={len(refs)} captions={len([c for c in new_captions if not str(c).startswith('PDF:')])} pdfs={len([c for c in new_captions if str(c).startswith('PDF:')])} annotated={len(annotated_urls)}"
+        f"analyze_media: done refs={len(refs)} images={len(media_images)} "
+        f"captions_new={len([c for c in new_captions if not str(c).startswith('PDF:')])} "
+        f"pdfs_new={len([c for c in new_captions if str(c).startswith('PDF:')])}"
     )
     return state
