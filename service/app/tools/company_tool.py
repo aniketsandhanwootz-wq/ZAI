@@ -14,6 +14,28 @@ def _slug(s: str) -> str:
     s = re.sub(r"-{2,}", "-", s).strip("-")
     return s or ""
 
+def normalize_company_name(name: str) -> str:
+    """
+    Normalizes a company name for routing/grouping.
+    Example: "Unnati 123" -> "Unnati"
+    """
+    s = (name or "").strip()
+    if not s:
+        return ""
+    # Reuse same normalization rule as project-name derivation:
+    # splits left of separators and strips trailing numeric token
+    norm = derive_company_name_from_project_name(s)
+    return norm or s
+
+
+def normalize_company_key(name: str, *, fallback: str = "") -> str:
+    """
+    Normalizes routing key for Teams channel.
+    Example: "Unnati 123" -> "unnati"
+    """
+    norm_name = normalize_company_name(name)
+    key = _slug(norm_name)
+    return key or (fallback or "")
 
 # Split project name on common separators, keep left as "company-ish"
 _SPLIT_RE = re.compile(r"\s*[-–—|]\s*")  # -, –, —, |
@@ -102,10 +124,9 @@ class CompanyTool:
         name = (prof.name if prof else "").strip()
         desc = (prof.description if prof else "").strip()
 
-        # Routing key preference:
-        # 1) slug(company_name) if available
-        # 2) tenant_row_id fallback (still stable, but not pretty)
-        key = _slug(name) or tenant_row_id
+        # ✅ Normalize name for routing (e.g. "Unnati 123" -> "Unnati")
+        key = normalize_company_key(name, fallback=tenant_row_id)
+
 
         # If Glide returns nothing useful, treat as "not found"
         if not name and not desc:

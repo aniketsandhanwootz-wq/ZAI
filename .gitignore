@@ -37,3 +37,5 @@ dist/
 build/
 *.egg-info/
 service/gcp_key.json
+
+glide_test.py

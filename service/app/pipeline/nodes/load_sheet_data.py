@@ -6,6 +6,10 @@ import re
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.company_tool import CompanyTool
+from ...tools.company_cache_tool import CompanyCacheTool
+from ...tools.embed_tool import EmbedTool
+from ...tools.vector_tool import VectorTool
+
 
 
 _CLOSURE_HINTS = re.compile(
@@ -145,6 +149,58 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
 
     except Exception as e:
         (state.get("logs") or []).append(f"Company routing build failed (non-fatal): {e}")
+
+    # -------------------------
+    # ✅ Company description fallback (DB cache -> Glide -> embed -> vectors)
+    # -------------------------
+    try:
+        tenant_row_id = (state.get("tenant_id") or "").strip()
+        cur_desc = (state.get("company_description") or "").strip()
+
+        if tenant_row_id and not cur_desc:
+            cache = CompanyCacheTool(settings)
+            cached = cache.get(tenant_row_id)
+            if cached and (cached.get("company_description") or "").strip():
+                state["company_description"] = (cached.get("company_description") or "").strip()
+                (state.get("logs") or []).append("Loaded company_description from Postgres cache")
+
+        # Still missing? fetch from Glide once and cache it.
+        cur_desc = (state.get("company_description") or "").strip()
+        if tenant_row_id and not cur_desc:
+            ct = CompanyTool(settings)
+            glide_ctx = ct.get_company_context(tenant_row_id)
+            if glide_ctx and (glide_ctx.company_description or "").strip():
+                state["company_description"] = (glide_ctx.company_description or "").strip()
+                state["company_name"] = glide_ctx.company_name or state.get("company_name")
+                state["company_key"] = glide_ctx.company_key or state.get("company_key")
+
+                # persist cache
+                cache = CompanyCacheTool(settings)
+                cache.upsert(
+                    tenant_row_id=tenant_row_id,
+                    company_name=(state.get("company_name") or ""),
+                    company_description=(state.get("company_description") or ""),
+                    raw={"source": "glide_fallback"},
+                    source="glide",
+                )
+                (state.get("logs") or []).append("Fetched company_description from Glide and cached to Postgres")
+
+        # If we have description now: embed + upsert company vector
+        desc_final = (state.get("company_description") or "").strip()
+        if tenant_row_id and desc_final:
+            company_name = (state.get("company_name") or "").strip()
+            embedder = EmbedTool(settings)
+            vdb = VectorTool(settings)
+            emb = embedder.embed_text(f"Company: {company_name}\n{desc_final}")
+            vdb.upsert_company_profile(
+                tenant_row_id=tenant_row_id,
+                company_name=company_name,
+                company_description=desc_final,
+                embedding=emb,
+            )
+            (state.get("logs") or []).append("Upserted company profile vector (company_vectors)")
+    except Exception as e:
+        (state.get("logs") or []).append(f"Company description fallback/embed failed (non-fatal): {e}")
 
     (state.get("logs") or []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes + company routing")
     return state

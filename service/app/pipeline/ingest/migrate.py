@@ -18,7 +18,15 @@ def run_migrations(settings: Settings) -> None:
     repo_root = Path(__file__).resolve().parents[4]  # service/app/pipeline/ingest -> repo root
     mig_dir = repo_root / "packages" / "db" / "migrations"
 
-    files = ["001_extensions.sql", "002_core_tables.sql", "003_indexes.sql", "004_fix_ai_runs_idempotency.sql"]
+    files = [
+        "001_extensions.sql",
+        "002_core_tables.sql",
+        "003_indexes.sql",
+        "004_fix_ai_runs_idempotency.sql",
+        "005_incident_vector_type_index.sql",
+        "006_artifacts_lookup_indexes.sql",
+        "007_company_profiles.sql",
+    ]
     logger.info("running migrations from %s", mig_dir)
 
     with psycopg2.connect(settings.database_url) as conn:
@@ -37,6 +45,7 @@ def run_migrations(settings: Settings) -> None:
                 cur.execute("ANALYZE incident_vectors;")
                 cur.execute("ANALYZE ccp_vectors;")
                 cur.execute("ANALYZE dashboard_vectors;")
+                cur.execute("ANALYZE company_vectors;")
             conn.commit()
     except Exception:
         # don't fail boot

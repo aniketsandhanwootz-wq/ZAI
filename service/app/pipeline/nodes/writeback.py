@@ -5,6 +5,7 @@ from typing import Any, Dict
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool
 from ...integrations.teams_client import TeamsClient
+from ...tools.company_tool import CompanyTool, normalize_company_key, normalize_company_name
 
 
 def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -37,24 +38,58 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         try:
             client = TeamsClient(getattr(settings, "teams_webhook_url", ""))
             if client.enabled():
+                tenant_row_id = (state.get("tenant_id") or "").strip()
+                project_name = (state.get("project_name") or "").strip()
+
+                company_name_raw = (state.get("company_name") or "").strip()
+                company_desc = (state.get("company_description") or "").strip()
+                company_key_in_state = (state.get("company_key") or "").strip()
+
+                # ✅ Fallback: if upstream didn't populate company_* fields reliably, derive now
+                if not company_name_raw or not company_key_in_state:
+                    try:
+                        ctool = CompanyTool(settings)
+                        ctx = None
+                        if tenant_row_id:
+                            ctx = ctool.get_company_context(tenant_row_id)
+                        if not ctx and project_name:
+                            ctx = ctool.from_project_name(project_name, tenant_row_id=tenant_row_id)
+
+                        if ctx:
+                            company_name_raw = company_name_raw or (ctx.company_name or "")
+                            company_desc = company_desc or (ctx.company_description or "")
+                            company_key_in_state = company_key_in_state or (ctx.company_key or "")
+                    except Exception:
+                        pass
+
+                company_name_norm = normalize_company_name(company_name_raw or project_name)
+                company_key_norm = company_key_in_state or normalize_company_key(
+                    company_name_raw or project_name,
+                    fallback=tenant_row_id,
+                )
+
                 payload = {
                     "type": "checkin_ai_reply",
 
-                    # routing inputs (Power Automate should "ensure channel" by this key)
-                    "tenant_row_id": state.get("tenant_id"),
-                    "company_key": state.get("company_key") or state.get("tenant_id"),
-                    "company_name": state.get("company_name"),
-                    "company_description": state.get("company_description"),
+                    # ✅ routing inputs (Power Automate should route using company_key_normalized)
+                    "tenant_row_id": tenant_row_id,
+                    "company_key": company_key_norm,  # backward compatible (keep)
+                    "company_key_normalized": company_key_norm,
+                    "company_key_raw": company_key_in_state or "",
+                    "company_name": company_name_raw,
+                    "company_name_normalized": company_name_norm,
+                    "company_description": company_desc,
 
                     # checkin info
                     "checkin_id": checkin_id,
-                    "project_name": state.get("project_name"),
+                    "project_name": project_name,
                     "part_number": state.get("part_number"),
                     "legacy_id": state.get("legacy_id"),
                     "status": state.get("checkin_status"),
                     "ai_reply": state.get("ai_reply"),
                     "annotated_images": annotated_urls[:3],
                 }
+
                 client.post_message(payload)
                 (state.get("logs") or []).append("Posted summary to Teams (company-routed payload)")
         except Exception as e:

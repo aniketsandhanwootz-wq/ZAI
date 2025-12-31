@@ -93,3 +93,49 @@ class GlideClient:
             description=desc,
             raw=row,
         )
+
+    def list_company_rows(self, *, timeout: int = 60) -> list[dict]:
+        """
+        Fetches all rows from Glide company table using tableName query (no SQL).
+        Handles pagination if Glide returns 'next'.
+        """
+        if not self.enabled():
+            return []
+
+        s = self.settings
+        url = f"{s.glide_base_url}/api/function/queryTables"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {s.glide_api_key}",
+        }
+
+        out: list[dict] = []
+        start_at: str | None = None
+
+        while True:
+            q: Dict[str, Any] = {"tableName": s.glide_company_table, "utc": True}
+            if start_at:
+                q["startAt"] = start_at
+
+            payload = {"appID": s.glide_app_id, "queries": [q]}
+            r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if not r.ok:
+                raise RuntimeError(f"Glide queryTables(list) failed: {r.status_code} {r.text}")
+
+            data = r.json()
+            arr = data if isinstance(data, list) else (data.get("data") or data.get("results") or [])
+            if not arr or not isinstance(arr, list):
+                break
+
+            block = arr[0] if isinstance(arr[0], dict) else {}
+            rows = block.get("rows") or []
+            if isinstance(rows, list):
+                out.extend([x for x in rows if isinstance(x, dict)])
+
+            nxt = block.get("next")
+            if not nxt:
+                break
+            start_at = str(nxt)
+
+        return out

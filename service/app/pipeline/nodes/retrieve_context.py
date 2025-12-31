@@ -35,6 +35,19 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
 
     q = embedder.embed_query(text)
 
+    # 0) Company profile vector (client constraints)
+    try:
+        company_matches = vector_db.search_company_profiles(query_embedding=q, top_k=1)
+        state["company_profile_matches"] = company_matches
+        if company_matches:
+            best = company_matches[0]
+            state["company_profile_text"] = (
+                f"Company: {best.get('company_name')}\nClient description: {best.get('company_description')}"
+            ).strip()
+    except Exception as e:
+        (state.get("logs") or []).append(f"Company vector search failed (non-fatal): {e}")
+        state["company_profile_matches"] = []
+
     project_name = state.get("project_name")
     part_number = state.get("part_number")
 

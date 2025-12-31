@@ -255,6 +255,87 @@ class VectorTool:
                 sql,
                 (tenant_id, project_name, part_number, legacy_id, update_message, _vec_str(embedding), h),
             )
+    # ---------------------------
+    # Company profile vectors
+    # ---------------------------
+
+    def upsert_company_profile(
+        self,
+        *,
+        tenant_row_id: str,
+        company_name: str,
+        company_description: str,
+        embedding: List[float],
+        content_hash: Optional[str] = None,
+    ) -> None:
+        tenant_row_id = (tenant_row_id or "").strip()
+        if not tenant_row_id:
+            return
+
+        text = (company_description or "").strip()
+        if not text:
+            return
+
+        h = content_hash or self.hash_text(f"{company_name or ''}\n{text}")
+
+        sql = """
+        INSERT INTO company_vectors (
+          tenant_row_id, embedding, company_name, company_description, content_hash, updated_at
+        )
+        VALUES (%s,%s::vector,%s,%s,%s, now())
+        ON CONFLICT (tenant_row_id)
+        DO UPDATE SET
+          embedding=EXCLUDED.embedding,
+          company_name=EXCLUDED.company_name,
+          company_description=EXCLUDED.company_description,
+          content_hash=EXCLUDED.content_hash,
+          updated_at=now()
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    tenant_row_id,
+                    _vec_str(embedding),
+                    (company_name or "").strip() or None,
+                    text,
+                    h,
+                ),
+            )
+
+    def search_company_profiles(
+        self,
+        *,
+        query_embedding: List[float],
+        top_k: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """
+        Finds most relevant company description (global-ish).
+        If you later want tenant-scoped companies, add tenant filtering.
+        """
+        sql = """
+        SELECT
+          tenant_row_id,
+          company_name,
+          company_description,
+          (embedding <=> %s::vector) AS distance
+        FROM company_vectors
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+        """
+        qv = _vec_str(query_embedding)
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (qv, qv, int(top_k)))
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "tenant_row_id": r["tenant_row_id"],
+                    "company_name": r["company_name"],
+                    "company_description": r["company_description"],
+                    "distance": float(r["distance"]),
+                }
+                for r in rows
+            ]
 
     # ---------------------------
     # Search (pgvector cosine distance)
