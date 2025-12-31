@@ -1,13 +1,13 @@
 # service/app/consumer.py
 import logging
-import os
-import socket
 import threading
 import time
+import os
+import socket
 from uuid import uuid4
 
-from rq import Queue, Worker
 from redis.exceptions import ConnectionError as RedisConnectionError
+from rq import Worker, Queue
 
 from .config import Settings
 from .redis_conn import get_redis
@@ -20,6 +20,7 @@ _consumer_started = False
 def start_consumer_thread(settings: Settings) -> None:
     """
     Runs an RQ worker inside the SAME web service process (MVP cost saver).
+    Keep RUN_CONSUMER=1 for this mode.
     """
     global _consumer_started
     if _consumer_started:
@@ -32,14 +33,11 @@ def start_consumer_thread(settings: Settings) -> None:
 
 
 def _run_worker(settings: Settings) -> None:
-    queue_names = [q.strip() for q in settings.consumer_queues.split(",") if q.strip()]
-
-    # Reuse shared pool
     redis_conn = get_redis(settings.redis_url)
+    queue_names = [q.strip() for q in settings.consumer_queues.split(",") if q.strip()]
     queues = [Queue(name, connection=redis_conn) for name in queue_names]
 
     while True:
-        worker = None
         try:
             worker_name = f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
             worker = Worker(queues, connection=redis_conn, name=worker_name)
@@ -48,22 +46,10 @@ def _run_worker(settings: Settings) -> None:
             worker.work(with_scheduler=False, burst=False)
 
         except RedisConnectionError as e:
-            # Redis saturated / maxclients etc.
+            # This includes pool exhaustion ("Too many connections") and server maxclients.
             logger.exception("Redis connection error; retrying in 5s: %s", e)
-
-            # Close all pooled sockets so we don't keep stale connections around
-            try:
-                redis_conn.connection_pool.disconnect(inuse_connections=True)
-            except Exception:
-                pass
-
             time.sleep(5)
 
         except Exception as e:
             logger.exception("worker crashed; retrying in 5s: %s", e)
-            try:
-                if worker is not None:
-                    worker.register_death()
-            except Exception:
-                pass
             time.sleep(5)

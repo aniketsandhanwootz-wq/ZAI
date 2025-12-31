@@ -1,4 +1,3 @@
-# service/app/routers/appsheet_webhook.py
 from __future__ import annotations
 
 from typing import Optional
@@ -27,7 +26,7 @@ def _enqueue(settings: Settings, payload: WebhookPayload) -> dict:
         job_id = enqueue_job(settings, payload.model_dump(exclude_none=True))
         return {"ok": True, "job_id": job_id}
     except RedisConnectionError as e:
-        # Apps Script can retry later
+        # Apps Script can retry safely
         raise HTTPException(status_code=503, detail=f"Queue unavailable: {e}")
 
 
