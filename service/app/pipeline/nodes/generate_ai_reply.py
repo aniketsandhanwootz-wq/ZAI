@@ -1,6 +1,7 @@
+# service/app/pipeline/nodes/generate_ai_reply.py
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 from pathlib import Path
 
 from ...config import Settings
@@ -17,13 +18,36 @@ def _load_prompt_template() -> str:
 
 
 def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
-    """
-    Safe renderer: ONLY replaces our known placeholders like {snapshot}, {ctx}, etc.
-    Leaves any other braces (e.g., JSON examples) untouched.
-    """
     out = template
     for k, v in vars.items():
         out = out.replace("{" + k + "}", v or "")
+    return out
+
+
+def _normalize_images_defects(raw: Any, image_count: int) -> List[Dict[str, Any]]:
+    """
+    Always returns entries for image_index 0..image_count-1
+    [{ "image_index": i, "defects": [...] }, ...]
+    """
+    seen: Dict[int, Dict[str, Any]] = {}
+    if isinstance(raw, list):
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            try:
+                idx = int(it.get("image_index"))
+            except Exception:
+                continue
+            if idx < 0 or idx >= image_count:
+                continue
+            defects = it.get("defects") or []
+            if not isinstance(defects, list):
+                defects = []
+            seen[idx] = {"image_index": idx, "defects": defects}
+
+    out: List[Dict[str, Any]] = []
+    for i in range(max(0, int(image_count))):
+        out.append(seen.get(i) or {"image_index": i, "defects": []})
     return out
 
 
@@ -55,7 +79,6 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         ).strip()
 
     template = _load_prompt_template()
-
     prompt = _render_template_safe(
         template,
         {
@@ -66,7 +89,26 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         },
     )
 
+    images = state.get("media_images") or []
+    if not isinstance(images, list):
+        images = []
+
     llm = LLMTool(settings)
-    state["ai_reply"] = llm.generate_text(prompt).strip()
-    state.setdefault("logs", []).append("Generated AI reply (safe-template)")
+
+    try:
+        out = llm.generate_json_with_images(prompt=prompt, images=images, temperature=0.0)
+    except Exception as e:
+        state.setdefault("logs", []).append(f"LLM JSON+images failed: {e}")
+        state["ai_reply"] = llm.generate_text(prompt).strip()
+        state["defects_by_image"] = []
+        return state
+
+    technical = (out.get("technical_advice") or "").strip()
+    if not technical:
+        technical = llm.generate_text(prompt).strip()
+
+    state["ai_reply"] = technical
+    state["defects_by_image"] = _normalize_images_defects(out.get("images"), len(images))
+
+    state.setdefault("logs", []).append("Generated AI reply + defects (single prompt, multimodal)")
     return state

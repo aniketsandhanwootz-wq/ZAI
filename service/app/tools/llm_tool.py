@@ -1,14 +1,52 @@
 # service/app/tools/llm_tool.py
+from __future__ import annotations
+
+import base64
+import json
 import os
+from typing import Any, Dict, List
+
 import requests
+
 from ..config import Settings
+
+
+def _b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("utf-8")
+
+
+def _extract_json(text: str) -> Dict[str, Any]:
+    s = (text or "").strip()
+    if not s:
+        return {}
+
+    if s.startswith("```"):
+        s = s.strip().strip("`").strip()
+        if s.lower().startswith("json"):
+            s = s[4:].strip()
+
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            return json.loads(s)
+        except Exception:
+            return {}
+
+    i = s.find("{")
+    j = s.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            return json.loads(s[i : j + 1])
+        except Exception:
+            return {}
+
+    return {}
 
 
 class LLMTool:
     """
     Supports:
-      - openai_compat (existing)
-      - gemini (Google Generative Language API)
+      - openai_compat (text only)
+      - gemini (text + multimodal inlineData)
     """
 
     def __init__(self, settings: Settings):
@@ -38,12 +76,10 @@ class LLMTool:
             base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
             model = self.settings.llm_model or "gemini-2.5-flash"
             key = self.settings.llm_api_key
-
             url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+
             payload = {
-                "systemInstruction": {
-                    "parts": [{"text": "You are a helpful manufacturing quality assistant."}]
-                },
+                "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.2},
             }
@@ -53,10 +89,57 @@ class LLMTool:
                 raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
 
             data = r.json()
-            candidates = data.get("candidates", [])
+            candidates = data.get("candidates", []) or []
             if not candidates:
                 return ""
-            parts = candidates[0].get("content", {}).get("parts", [])
-            return "".join([p.get("text", "") for p in parts]).strip()
+            parts = candidates[0].get("content", {}).get("parts", []) or []
+            return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
 
         raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
+
+    def generate_json_with_images(
+        self,
+        *,
+        prompt: str,
+        images: List[Dict[str, Any]],
+        temperature: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Gemini multimodal call:
+          images = [{ "image_index": 0, "mime_type": "image/jpeg", "image_bytes": b"..." }, ...]
+        Returns parsed JSON dict ({} if parse fails).
+        """
+        if self.settings.llm_provider != "gemini":
+            return _extract_json(self.generate_text(prompt))
+
+        base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
+        model = self.settings.llm_model or "gemini-2.5-flash"
+        key = self.settings.llm_api_key
+        url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+
+        parts: List[Dict[str, Any]] = [{"text": prompt}]
+        for img in images or []:
+            b = img.get("image_bytes")
+            if not isinstance(b, (bytes, bytearray)) or not b:
+                continue
+            mime = (img.get("mime_type") or "image/jpeg").strip()
+            parts.append({"inlineData": {"mimeType": mime, "data": _b64(bytes(b))}})
+
+        payload = {
+            "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {"temperature": float(temperature)},
+        }
+
+        r = requests.post(url, json=payload, timeout=180)
+        if not r.ok:
+            raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
+
+        data = r.json()
+        candidates = data.get("candidates", []) or []
+        if not candidates:
+            return {}
+
+        out_parts = candidates[0].get("content", {}).get("parts", []) or []
+        text = "".join([p.get("text", "") for p in out_parts if isinstance(p, dict)]).strip()
+        return _extract_json(text)
