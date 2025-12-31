@@ -1,55 +1,89 @@
 # service/app/consumer.py
+from __future__ import annotations
+
 import logging
+import os
+import subprocess
 import threading
 import time
-import os
-import socket
-from uuid import uuid4
-
-from redis.exceptions import ConnectionError as RedisConnectionError
-from rq import Worker, Queue
+from typing import Optional
 
 from .config import Settings
-from .redis_conn import get_redis
 
 logger = logging.getLogger("zai.consumer")
 
-_consumer_started = False
+_started = False
+_stop = threading.Event()
+_proc: Optional[subprocess.Popen] = None
 
 
 def start_consumer_thread(settings: Settings) -> None:
     """
-    Runs an RQ worker inside the SAME web service process (MVP cost saver).
+    Starts RQ worker as a SEPARATE PROCESS (safe), but still inside same Render Web Service container.
     Keep RUN_CONSUMER=1 for this mode.
     """
-    global _consumer_started
-    if _consumer_started:
+    global _started
+    if _started:
         return
-    _consumer_started = True
+    _started = True
 
-    t = threading.Thread(target=_run_worker, args=(settings,), daemon=True)
+    t = threading.Thread(target=_monitor_worker_proc, args=(settings,), daemon=True)
     t.start()
-    logger.info("consumer thread started. queues=%s", settings.consumer_queues)
+    logger.info("consumer monitor started. queues=%s", settings.consumer_queues)
 
 
-def _run_worker(settings: Settings) -> None:
-    redis_conn = get_redis(settings.redis_url)
-    queue_names = [q.strip() for q in settings.consumer_queues.split(",") if q.strip()]
-    queues = [Queue(name, connection=redis_conn) for name in queue_names]
+def stop_consumer() -> None:
+    """Call on shutdown to stop worker process cleanly."""
+    _stop.set()
+    _terminate_proc()
 
-    while True:
+
+def _monitor_worker_proc(settings: Settings) -> None:
+    backoff = 2
+    while not _stop.is_set():
         try:
-            worker_name = f"{socket.gethostname()}-{os.getpid()}-{uuid4().hex[:8]}"
-            worker = Worker(queues, connection=redis_conn, name=worker_name)
-
-            logger.info("worker.work() loop starting… name=%s queues=%s", worker_name, queue_names)
-            worker.work(with_scheduler=False, burst=False)
-
-        except RedisConnectionError as e:
-            # This includes pool exhaustion ("Too many connections") and server maxclients.
-            logger.exception("Redis connection error; retrying in 5s: %s", e)
-            time.sleep(5)
-
+            if _proc is None or _proc.poll() is not None:
+                _spawn_worker(settings)
+                backoff = 2
+            time.sleep(1)
         except Exception as e:
-            logger.exception("worker crashed; retrying in 5s: %s", e)
-            time.sleep(5)
+            logger.exception("consumer monitor error; retrying in %ss: %s", backoff, e)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+
+
+def _spawn_worker(settings: Settings) -> None:
+    global _proc
+
+    queues = [q.strip() for q in (settings.consumer_queues or "").split(",") if q.strip()] or ["default"]
+
+    # Run the RQ worker CLI in a separate process.
+    # This avoids running Worker() inside a thread and avoids sharing the web pool.
+    cmd = ["rq", "worker", *queues, "--url", settings.redis_url]
+
+    env = os.environ.copy()
+    env.setdefault("RQ_WORKER_LOG_LEVEL", "INFO")
+
+    logger.info("starting rq worker process: %s", " ".join(cmd))
+    _proc = subprocess.Popen(cmd, env=env)
+
+    time.sleep(0.25)
+    if _proc.poll() is not None:
+        logger.error("rq worker exited immediately with code=%s", _proc.returncode)
+
+
+def _terminate_proc() -> None:
+    global _proc
+    if _proc is None:
+        return
+    try:
+        if _proc.poll() is None:
+            _proc.terminate()
+            try:
+                _proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _proc.kill()
+    except Exception:
+        pass
+    finally:
+        _proc = None
