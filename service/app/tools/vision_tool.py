@@ -61,15 +61,12 @@ def _clamp01(x: float) -> float:
 
 class VisionTool:
     """
-    Gemini-based image caption + defect detection (boxes).
+    Gemini-based image caption tool (retrieval captions only).
 
-    IMPORTANT: We separate them into two calls:
-      - caption_for_retrieval(): returns 6-line caption only (plain text)
-      - detect_defects(): returns JSON { "defects": [...] } only
-
-    Compatibility:
-      - Can be constructed either as VisionTool(settings) OR VisionTool(api_key=..., model=...)
-      - Provides caption_image(...) alias for older callers.
+    NOTE:
+      - Defect detection + bounding boxes MUST be produced by the main multimodal LLM prompt:
+        packages/prompts/checkin_reply.md via generate_ai_reply.py
+      - This tool intentionally does NOT run defect detection.
     """
 
     def __init__(
@@ -184,95 +181,12 @@ class VisionTool:
         model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Returns strict JSON dict:
-          { "defects": [ {label, confidence, box:{x1,y1,x2,y2}} ] }
+        Disabled by design.
+
+        Defect detection + bounding boxes are generated ONLY in the main prompt:
+        packages/prompts/checkin_reply.md (via LLMTool.generate_json_with_images()).
         """
-        url = self._url(model or os.getenv("VISION_DETECT_MODEL") or self.model)
-        mime = (mime_type or "image/jpeg").strip()
-
-        prompt = (
-            "You are a manufacturing quality inspection assistant.\n\n"
-            "TASK:\n"
-            "- Detect CLEARLY VISIBLE manufacturing defects.\n"
-            "- Return bounding boxes (normalized 0..1).\n\n"
-            "HARD RULES:\n"
-            "- Output MUST be VALID JSON ONLY. No markdown. No extra text.\n"
-            "- If you are unsure OR no defect is clearly visible, return: {\"defects\": []}\n"
-            "- Boxes must be normalized floats in [0,1].\n\n"
-            "Allowed defect labels (pick best match):\n"
-            "scratch, dent, crack, burr, chip, rust, discoloration, contamination, "
-            "weld_porosity, weld_lack_of_fusion, weld_crater, weld_spatter, misalignment, other\n\n"
-            "JSON schema:\n"
-            "{\n"
-            '  "defects": [\n'
-            "    {\n"
-            '      "label": "scratch|dent|crack|burr|chip|rust|discoloration|contamination|weld_porosity|weld_lack_of_fusion|weld_crater|weld_spatter|misalignment|other",\n'
-            '      "confidence": 0.0,\n'
-            '      "box": {"x1": 0.0, "y1": 0.0, "x2": 0.0, "y2": 0.0}\n'
-            "    }\n"
-            "  ]\n"
-            "}\n"
+        raise RuntimeError(
+            "VisionTool.detect_defects() is disabled. "
+            "Use checkin_reply.md (multimodal) to generate defects_by_image."
         )
-        if (context_hint or "").strip():
-            prompt += "\nContext hint (use only if relevant; do not copy blindly):\n" + context_hint.strip() + "\n"
-
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": prompt},
-                        {"inlineData": {"mimeType": mime, "data": _b64_image(image_bytes)}},
-                    ],
-                }
-            ],
-            "generationConfig": {"temperature": 0.0},
-        }
-
-        r = requests.post(url, json=payload, timeout=120)
-        if not r.ok:
-            raise RuntimeError(f"Vision defect detect failed: {r.status_code} {r.text}")
-
-        data = r.json()
-        candidates = data.get("candidates", []) or []
-        if not candidates:
-            return {"defects": []}
-
-        parts = candidates[0].get("content", {}).get("parts", []) or []
-        text = "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
-
-        out = _extract_json(text)
-        if not isinstance(out, dict):
-            out = {}
-
-        defects = out.get("defects") or []
-        if not isinstance(defects, list):
-            defects = []
-
-        cleaned: List[Dict[str, Any]] = []
-        for d in defects:
-            if not isinstance(d, dict):
-                continue
-            box = d.get("box") or {}
-            if not isinstance(box, dict):
-                box = {}
-
-            x1 = _clamp01(box.get("x1", 0.0))
-            y1 = _clamp01(box.get("y1", 0.0))
-            x2 = _clamp01(box.get("x2", 0.0))
-            y2 = _clamp01(box.get("y2", 0.0))
-
-            if x2 < x1:
-                x1, x2 = x2, x1
-            if y2 < y1:
-                y1, y2 = y2, y1
-
-            cleaned.append(
-                {
-                    "label": str(d.get("label") or "other"),
-                    "confidence": float(d.get("confidence") or 0.0),
-                    "box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                }
-            )
-
-        return {"defects": cleaned}
