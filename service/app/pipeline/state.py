@@ -17,6 +17,9 @@ class GraphState:
     conversation_id: Optional[str] = None
     ccp_id: Optional[str] = None
 
+    # Run tracking
+    run_id: Optional[str] = None
+
     # Loaded sheet data
     checkin_row: Optional[Dict[str, Any]] = None
     project_row: Optional[Dict[str, Any]] = None

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar
+from contextlib import contextmanager
+
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 run_id_var: ContextVar[str] = ContextVar("run_id", default="-")
@@ -27,3 +29,11 @@ def setup_logging() -> None:
 
     # avoid duplicate handlers on reload
     root.handlers = [handler]
+
+@contextmanager
+def bind_run_id(run_id: str):
+    token = run_id_var.set((run_id or "").strip() or "-")
+    try:
+        yield
+    finally:
+        run_id_var.reset(token)

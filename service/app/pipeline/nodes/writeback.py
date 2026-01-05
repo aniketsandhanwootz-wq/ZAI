@@ -6,6 +6,14 @@ from ...config import Settings
 from ...tools.sheets_tool import SheetsTool
 from ...integrations.teams_client import TeamsClient
 from ...tools.company_tool import CompanyTool, normalize_company_key, normalize_company_name
+import json
+import hashlib
+from ...tools.db_tool import DBTool
+
+
+def _payload_hash(payload: dict) -> str:
+    b = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(b).hexdigest()
 
 
 def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,10 +98,44 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "ai_reply": reply,  # IMPORTANT: send final reply with annotated links appended
                     "annotated_images": annotated_urls[:3] if isinstance(annotated_urls, list) else [],
                 }
+                # ---- Idempotency: avoid duplicate external posts ----
+                run_id = (state.get("run_id") or "").strip()
+                if run_id:
+                    db = DBTool(settings.database_url)
+                    h = _payload_hash(payload)
+
+                    existing = db.existing_artifact_source_hashes(
+                        tenant_id=tenant_row_id or company_key_norm or "unknown",
+                        checkin_id=checkin_id,
+                        artifact_type="TEAMS_POST",
+                    )
+
+                    if h in existing:
+                        (state.get("logs") or []).append("Teams post skipped (idempotency hit: already posted)")
+                        return state
 
 
                 client.post_message(payload)
                 (state.get("logs") or []).append("Posted summary to Teams (company-routed payload)")
+
+                # Mark as posted (idempotency record)
+                try:
+                    if run_id:
+                        db.insert_artifact(
+                            run_id=run_id,
+                            artifact_type="TEAMS_POST",
+                            url="power_automate_webhook",
+                            meta={
+                                "tenant_id": tenant_row_id or company_key_norm or "unknown",
+                                "checkin_id": checkin_id,
+                                "source_hash": _payload_hash(payload),
+                                "company_key_normalized": company_key_norm,
+                            },
+                        )
+                except Exception:
+                    # never fail pipeline due to bookkeeping
+                    pass
+
         except Exception as e:
             (state.get("logs") or []).append(f"Teams post failed: {e}")
 

@@ -14,7 +14,11 @@ class RunLog:
         self.settings = settings
 
     def _conn(self):
-        return psycopg2.connect(self.settings.database_url)
+        conn = psycopg2.connect(self.settings.database_url)
+        # Connection context manager will commit/rollback automatically,
+        # but keeping explicit close behavior predictable is useful.
+        return conn
+
 
     def start(self, tenant_id: str, event_type: str, primary_id: str) -> str:
         """
@@ -60,15 +64,24 @@ class RunLog:
 
     def success(self, run_id: str) -> None:
         sql = "UPDATE ai_runs SET status='SUCCESS', finished_at=now() WHERE run_id=%s;"
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (run_id,))
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (run_id,))
+        except Exception as e:
+            logger.warning("RunLog.success failed (non-fatal). run_id=%s err=%s", run_id, e)
+
 
     def error(self, run_id: str, message: str) -> None:
         sql = "UPDATE ai_runs SET status='ERROR', error_message=%s, finished_at=now() WHERE run_id=%s;"
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (message[:2000], run_id))
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (message[:2000], run_id))
+        except Exception as e:
+            # Never crash the worker just because run logging failed
+            logger.warning("RunLog.error failed (non-fatal). run_id=%s err=%s", run_id, e)
+
 
     def update_tenant(self, run_id: str, tenant_id: str) -> None:
         sql = "UPDATE ai_runs SET tenant_id=%s WHERE run_id=%s;"
