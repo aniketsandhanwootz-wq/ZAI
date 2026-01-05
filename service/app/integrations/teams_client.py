@@ -19,7 +19,11 @@ class TeamsClient:
     def post_message(self, payload: Dict[str, Any], *, timeout: int = 20) -> Optional[str]:
         if not self.webhook_url:
             return None
-        r = requests.post(self.webhook_url, json=payload, timeout=timeout)
+
+        headers = {"Content-Type": "application/json"}
+        r = requests.post(self.webhook_url, json=payload, headers=headers, timeout=timeout)
+
         if not r.ok:
-            raise RuntimeError(f"Teams POST failed: {r.status_code} {r.text}")
+            raise RuntimeError(f"Webhook POST failed: {r.status_code} {r.text}")
+
         return r.text

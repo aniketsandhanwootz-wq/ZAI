@@ -36,7 +36,11 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     # Teams post (only for new checkins)
     if (state.get("event_type") or "") == "CHECKIN_CREATED":
         try:
-            client = TeamsClient(getattr(settings, "teams_webhook_url", ""))
+            webhook_url = (
+                getattr(settings, "power_automate_webhook_url", "")  # new env
+                or getattr(settings, "teams_webhook_url", "")        # fallback
+            )
+            client = TeamsClient(webhook_url)           
             if client.enabled():
                 tenant_row_id = (state.get("tenant_id") or "").strip()
                 project_name = (state.get("project_name") or "").strip()
@@ -71,24 +75,22 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 payload = {
                     "type": "checkin_ai_reply",
 
-                    # ✅ routing inputs (Power Automate should route using company_key_normalized)
+                    # routing inputs (Power Automate filters on this)
                     "tenant_row_id": tenant_row_id,
-                    "company_key": company_key_norm,  # backward compatible (keep)
                     "company_key_normalized": company_key_norm,
-                    "company_key_raw": company_key_in_state or "",
+                    "company_key": company_key_norm,
                     "company_name": company_name_raw,
-                    "company_name_normalized": company_name_norm,
                     "company_description": company_desc,
 
                     # checkin info
                     "checkin_id": checkin_id,
                     "project_name": project_name,
-                    "part_number": state.get("part_number"),
-                    "legacy_id": state.get("legacy_id"),
-                    "status": state.get("checkin_status"),
-                    "ai_reply": state.get("ai_reply"),
-                    "annotated_images": annotated_urls[:3],
+                    "part_number": state.get("part_number") or "",
+                    "status": state.get("checkin_status") or "",
+                    "ai_reply": reply,  # IMPORTANT: send final reply with annotated links appended
+                    "annotated_images": annotated_urls[:3] if isinstance(annotated_urls, list) else [],
                 }
+
 
                 client.post_message(payload)
                 (state.get("logs") or []).append("Posted summary to Teams (company-routed payload)")
