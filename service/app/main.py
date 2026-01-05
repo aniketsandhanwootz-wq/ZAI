@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 
 from .config import load_settings, Settings
-from .consumer import start_consumer_thread
+from .consumer import start_consumer_thread, stop_consumer
 from .pipeline.graph import run_event_graph
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
@@ -48,6 +48,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # graceful shutdown: stop embedded rq worker process
+    try:
+        stop_consumer()
+    except Exception:
+        pass
 
 app = FastAPI(title="Wootz Checkin AI (MVP)", lifespan=lifespan)
 

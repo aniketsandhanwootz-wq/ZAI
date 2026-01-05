@@ -76,6 +76,9 @@ class Settings:
     # Teams
     teams_webhook_url: str
 
+    # Power Automate (Teams routing flow webhook)
+    power_automate_webhook_url: str
+
     # ✅ Single webhook secret for Apps Script
     webhook_secret: str
 
@@ -129,6 +132,8 @@ def load_settings() -> Settings:
 
     teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
 
+    power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
+
     # Sheets auth
     sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     sa_raw = (sa_raw or "").strip()
@@ -170,6 +175,7 @@ def load_settings() -> Settings:
         vision_api_key=vision_api_key,
         vision_model=vision_model,
         teams_webhook_url=teams_webhook_url,
+        power_automate_webhook_url=power_automate_webhook_url,
         webhook_secret=webhook_secret,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
