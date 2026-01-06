@@ -39,3 +39,6 @@ build/
 service/gcp_key.json
 
 glide_test.py
+
+service/scripts/credentials.json
+service/scripts/drive_token.json

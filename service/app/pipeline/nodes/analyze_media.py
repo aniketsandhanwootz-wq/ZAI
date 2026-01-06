@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import hashlib
 import re
+import logging
+
 
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
@@ -13,6 +15,8 @@ from ...tools.db_tool import DBTool
 
 
 _IMG_EXT_RX = re.compile(r"\.(png|jpe?g|webp|bmp|tiff?)$", re.IGNORECASE)
+
+logger = logging.getLogger("zai.media")
 
 
 def _sha256(b: bytes) -> str:
@@ -124,13 +128,13 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     else:
         (state.get("logs") or []).append("analyze_media: VISION_API_KEY not set -> captioning skipped, but images will be passed to LLM")
 
-    existing_caption_hashes = set()
-    if do_caption:
-        existing_caption_hashes = db.existing_artifact_source_hashes(
-            tenant_id=tenant_id,
-            checkin_id=checkin_id,
-            artifact_type="IMAGE_CAPTION",
-        )
+    # Load existing captions so media-only ingest can still upsert MEDIA vectors on reruns
+    existing_captions_by_hash = db.image_captions_by_hash(
+        tenant_id=tenant_id,
+        checkin_id=checkin_id,
+    )
+    existing_caption_hashes = set(existing_captions_by_hash.keys())
+
 
     existing_pdf_hashes = db.existing_artifact_source_hashes(
         tenant_id=tenant_id,
@@ -270,17 +274,23 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-        caption = ""
+        # If already captioned before, reuse it (idempotent reruns)
+        caption = (existing_captions_by_hash.get(source_hash) or "").strip()
 
-        if do_caption and vision:
-            if source_hash not in existing_caption_hashes:
+
+        if do_caption and vision and not caption:
+            try:
                 caption = vision.caption_for_retrieval(
                     image_bytes=data,
                     mime_type=mime if mime.startswith("image/") else "image/jpeg",
                     context_hint=context_hint,
                 ).strip()
+            except Exception as e:
+                (state.get("logs") or []).append(f"analyze_media: caption failed (non-fatal) ref={ref} err={e}")
+                caption = ""
 
-                db.insert_artifact_no_fail(
+            if caption and source_hash not in existing_caption_hashes:
+                ok = db.insert_artifact_no_fail(
                     run_id=run_id,
                     artifact_type="IMAGE_CAPTION",
                     url=att.source_ref or att.rel_path or "unknown",
@@ -295,11 +305,11 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                         "vision_model": getattr(settings, "vision_model", ""),
                     },
                 )
-
-                existing_caption_hashes.add(source_hash)
-
-                if caption:
+                if ok:
+                    existing_caption_hashes.add(source_hash)
+                    existing_captions_by_hash[source_hash] = caption
                     new_captions.append(caption)
+
 
         if caption:
             media_notes.append(f"- Image: {caption}")
@@ -308,8 +318,26 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
     state["media_images"] = media_images
 
-    if new_captions:
-        state["image_captions"] = new_captions
+    # Always provide captions for downstream MEDIA vector upsert:
+    # includes both existing (from DB) and new (from this run)
+    all_caps: List[str] = []
+    seen_caps = set()
+
+    for c in (new_captions or []):
+        cc = str(c or "").strip()
+        if cc and cc not in seen_caps:
+            all_caps.append(cc)
+            seen_caps.add(cc)
+
+    for _, c in (existing_captions_by_hash or {}).items():
+        cc = str(c or "").strip()
+        if cc and cc not in seen_caps:
+            all_caps.append(cc)
+            seen_caps.add(cc)
+
+    if all_caps:
+        state["image_captions"] = all_caps
+
 
     if media_notes:
         note_block = "MEDIA OBSERVATIONS:\n" + "\n".join(media_notes)

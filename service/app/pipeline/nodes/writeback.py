@@ -25,18 +25,26 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     annotated_urls = state.get("annotated_image_urls") or []
+
+    # Keep a clean reply for Teams formatting
+    reply_clean = reply
+
+    # For sheet writeback, you can keep appending annotated links (works for history)
     photos_cell = ""
     if isinstance(annotated_urls, list) and annotated_urls:
         photos_cell = "\n".join([str(u).strip() for u in annotated_urls[:3] if str(u).strip()])
-        reply = reply + "\n\nAnnotated images:\n" + "\n".join([f"- {u}" for u in annotated_urls[:3]])
+        reply_for_sheet = reply_clean + "\n\nAnnotated images:\n" + "\n".join([f"- {u}" for u in annotated_urls[:3]])
+    else:
+        reply_for_sheet = reply_clean
 
     sheets = SheetsTool(settings)
     sheets.append_conversation_ai_comment(
         checkin_id=checkin_id,
-        remark=reply,
+        remark=reply_for_sheet,
         status=state.get("checkin_status") or "",
         photos=photos_cell,
     )
+
 
     state["writeback_done"] = True
     (state.get("logs") or []).append("Wrote back AI comment to Conversation")
@@ -95,8 +103,14 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "project_name": project_name,
                     "part_number": state.get("part_number") or "",
                     "status": state.get("checkin_status") or "",
-                    "ai_reply": reply,  # IMPORTANT: send final reply with annotated links appended
+                    "ai_reply": reply_clean,
                     "annotated_images": annotated_urls[:3] if isinstance(annotated_urls, list) else [],
+
+                    "checkin_text": state.get("checkin_description") or "",
+                    "created_by": state.get("checkin_created_by") or "",
+                    "item_id": state.get("checkin_item_id") or "",
+                    "checkin_images": state.get("checkin_image_urls") or [],
+
                 }
                 # ---- Idempotency: avoid duplicate external posts ----
                 run_id = (state.get("run_id") or "").strip()

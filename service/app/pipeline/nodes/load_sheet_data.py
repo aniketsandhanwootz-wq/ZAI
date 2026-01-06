@@ -10,6 +10,8 @@ from ...tools.company_cache_tool import CompanyCacheTool
 from ...tools.embed_tool import EmbedTool
 from ...tools.vector_tool import VectorTool
 
+from ...tools.drive_tool import DriveTool
+from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
 
 
 _CLOSURE_HINTS = re.compile(
@@ -48,6 +50,39 @@ def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
 
     out = out[-8:]
     return "\n- " + "\n- ".join(out) if out else ""
+
+def _norm_header(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _find_row_value(row: Dict[str, Any], *, preferred_key: Optional[str], fallbacks: List[str]) -> str:
+    """
+    Try mapping-key first (preferred_key already _key()-normalized),
+    else try matching fallback headers by normalized string.
+    """
+    if not row:
+        return ""
+
+    if preferred_key and preferred_key in row:
+        return _norm_value(row.get(preferred_key, ""))
+
+    # build normalized lookup
+    norm_map = {_norm_header(k): k for k in row.keys()}
+    for fb in fallbacks:
+        k = norm_map.get(_norm_header(fb))
+        if k:
+            return _norm_value(row.get(k, ""))
+
+    return ""
+
+
+def _drive_view_url(file_id: str) -> str:
+    # Works well with Adaptive Cards IF the file is accessible by link.
+    # If not accessible, you must share/permit it (see note below).
+    fid = (file_id or "").strip()
+    if not fid:
+        return ""
+    return f"https://drive.google.com/uc?export=view&id={fid}"
 
 
 def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -89,6 +124,83 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     state["checkin_status"] = _norm_value((checkin_row or {}).get(k_ci_status, ""))
     state["checkin_description"] = _norm_value((checkin_row or {}).get(k_ci_desc, ""))
 
+    # -------------------------
+    # ✅ Extra fields needed for Teams post formatting
+    # -------------------------
+    # Try mapping keys first; if mapping doesn't have these, fallback to raw header names.
+    k_ci_created_by = None
+    k_ci_item_id = None
+    k_ci_insp_img = None
+
+    try:
+        k_ci_created_by = _key(sheets.map.col("checkin", "created_by"))
+    except Exception:
+        pass
+
+    try:
+        k_ci_item_id = _key(sheets.map.col("checkin", "id"))
+    except Exception:
+        pass
+
+    try:
+        k_ci_insp_img = _key(sheets.map.col("checkin", "inspection_image"))
+    except Exception:
+        pass
+
+    created_by = _find_row_value(
+        checkin_row or {},
+        preferred_key=k_ci_created_by,
+        fallbacks=["Created by", "Created By", "Creator", "created by"],
+    )
+
+    item_id = _find_row_value(
+        checkin_row or {},
+        preferred_key=k_ci_item_id,
+        fallbacks=["ID", "Id", "Part ID", "Unique ID"],
+    )
+
+    insp_cell = _find_row_value(
+        checkin_row or {},
+        preferred_key=k_ci_insp_img,
+        fallbacks=["Inspection Image", "Inspection Images", "CheckIn Image", "CheckIn Images", "Image", "Images"],
+    )
+
+    state["checkin_created_by"] = created_by or None
+    state["checkin_item_id"] = item_id or None
+
+    # Resolve inspection images into URLs (best-effort)
+    refs = split_cell_refs(insp_cell) if insp_cell else []
+    state["checkin_image_refs"] = refs
+
+    urls: List[str] = []
+    try:
+        drive = DriveTool(settings)
+        resolver = AttachmentResolver(drive)
+
+        for ref in refs[:3]:
+            att = resolver.resolve(ref)
+            if not att:
+                continue
+
+            # Direct URL already
+            if att.direct_url:
+                u = (att.direct_url or "").strip()
+                if u:
+                    urls.append(u)
+                continue
+
+            # Drive file id => convert to view URL
+            if att.drive_file_id:
+                u = _drive_view_url(att.drive_file_id)
+                if u:
+                    urls.append(u)
+                continue
+
+    except Exception as e:
+        (state.get("logs") or []).append(f"Inspection image resolve failed (non-fatal): {e}")
+
+    state["checkin_image_urls"] = urls
+    # -------------------------
     # Resolve tenant_id via Project sheet (still used for DB / vectors)
     tenant_id = ""
     project_row = None

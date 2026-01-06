@@ -106,3 +106,41 @@ class DBTool:
                     return (row[0] if row else "") or ""
         except Exception:
             return ""
+
+    def image_captions_by_hash(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+    ) -> Dict[str, str]:
+        """
+        Returns {source_hash: caption} for IMAGE_CAPTION artifacts for this tenant+checkin.
+        Used so media ingest can reuse old captions and still upsert MEDIA vectors.
+        """
+        q = """
+        SELECT
+          COALESCE(meta->>'source_hash','') AS source_hash,
+          COALESCE(meta->>'caption','') AS caption
+        FROM artifacts
+        WHERE artifact_type = 'IMAGE_CAPTION'
+          AND COALESCE(meta->>'tenant_id','') = %s
+          AND COALESCE(meta->>'checkin_id','') = %s
+          AND COALESCE(meta->>'source_hash','') <> ''
+        ORDER BY created_at DESC
+        """
+        out: Dict[str, str] = {}
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(q, (tenant_id, checkin_id))
+                    for (h, c) in cur.fetchall() or []:
+                        hh = str(h or "").strip()
+                        if not hh:
+                            continue
+                        cc = str(c or "").strip()
+                        # Keep newest caption per hash
+                        if hh not in out and cc:
+                            out[hh] = cc
+        except Exception:
+            return {}
+        return out
