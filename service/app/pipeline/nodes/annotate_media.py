@@ -7,7 +7,14 @@ from uuid import uuid4
 from ...config import Settings
 from ...tools.annotate_tool import AnnotateTool
 from ...tools.drive_tool import DriveTool
+import hashlib
 
+from ...tools.db_tool import DBTool
+
+def _sha256(b: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(b)
+    return h.hexdigest()
 
 def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -20,6 +27,18 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     checkin_id = (state.get("checkin_id") or "").strip()
     images = state.get("media_images") or []
     defects_by_image = state.get("defects_by_image") or []
+
+    tenant_id = (state.get("tenant_id") or "").strip()
+    run_id = (state.get("run_id") or "").strip()
+
+    db = DBTool(settings.database_url) if (tenant_id and run_id) else None
+    existing_annot_hashes = set()
+    if db and tenant_id and checkin_id:
+        existing_annot_hashes = db.existing_artifact_source_hashes(
+            tenant_id=tenant_id,
+            checkin_id=checkin_id,
+            artifact_type="ANNOTATED_IMAGE",
+        )
 
     if not checkin_id or not isinstance(images, list) or not images:
         state.setdefault("logs", []).append("annotate_media: skipped (no checkin_id/images)")
@@ -45,10 +64,17 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         state["annotated_image_urls"] = []
         return state
 
-    drive = DriveTool(settings)
-    annot = AnnotateTool()
+    # Drive init must be non-fatal
+    try:
+        drive = DriveTool(settings)
+    except Exception as e:
+        state.setdefault("logs", []).append(f"annotate_media: Drive init failed (non-fatal): {e}")
+        state["annotated_image_urls"] = []
+        return state
 
+    annot = AnnotateTool()
     urls: List[str] = []
+
     for img in images:
         try:
             idx = int(img.get("image_index"))
@@ -63,23 +89,65 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(b, (bytes, bytearray)) or not b:
             continue
 
-        annotated_bytes = annot.draw(bytes(b), defects, out_format="PNG")
+        # Draw (never crash)
+        try:
+            annotated_bytes = annot.draw(bytes(b), defects, out_format="PNG")
+        except Exception as e:
+            state.setdefault("logs", []).append(f"annotate_media: draw failed img={idx} (non-fatal): {e}")
+            continue
 
-        suffix = uuid4().hex[:6]
-        file_name = f"checkin_{checkin_id}_img_{idx}_annotated_{suffix}.png"
+        annot_hash = _sha256(annotated_bytes)
 
-        up = drive.upload_annotated_bytes(
-            checkin_id=checkin_id,
-            file_name=file_name,
-            content_bytes=annotated_bytes,
-            mime_type="image/png",
-            make_public=True,
-        )
+        # Idempotency: if already uploaded, reuse URL
+        if db and tenant_id and checkin_id and annot_hash in existing_annot_hashes:
+            existing_url = db.get_artifact_url_by_source_hash(
+                tenant_id=tenant_id,
+                checkin_id=checkin_id,
+                artifact_type="ANNOTATED_IMAGE",
+                source_hash=annot_hash,
+            )
+            if existing_url:
+                urls.append(existing_url)
+                continue
+
+        # Upload (never crash)
+        file_name = f"checkin_{checkin_id}_img_{idx}_annotated_{annot_hash[:10]}.png"
+        try:
+            up = drive.upload_annotated_bytes(
+                checkin_id=checkin_id,
+                file_name=file_name,
+                content_bytes=annotated_bytes,
+                mime_type="image/png",
+                make_public=True,
+            )
+        except Exception as e:
+            state.setdefault("logs", []).append(f"annotate_media: upload failed img={idx} (non-fatal): {e}")
+            continue
 
         link = (up.get("webViewLink") or up.get("webContentLink") or "").strip()
-        if link:
-            urls.append(link)
+        if not link:
+            continue
+
+        urls.append(link)
+
+        # Record artifact (never crash)
+        if db and tenant_id and run_id:
+            db.insert_artifact_no_fail(
+                run_id=run_id,
+                artifact_type="ANNOTATED_IMAGE",
+                url=link,
+                meta={
+                    "tenant_id": tenant_id,
+                    "checkin_id": checkin_id,
+                    "source_hash": annot_hash,                         # annotated bytes hash
+                    "original_source_hash": str(img.get("source_hash") or ""),
+                    "image_index": idx,
+                    "file_name": file_name,
+                    "mime_type": "image/png",
+                },
+            )
+            existing_annot_hashes.add(annot_hash)
 
     state["annotated_image_urls"] = urls
-    state.setdefault("logs", []).append(f"annotate_media: uploaded {len(urls)} annotated images")
+    state.setdefault("logs", []).append(f"annotate_media: produced {len(urls)} annotated image links")
     return state

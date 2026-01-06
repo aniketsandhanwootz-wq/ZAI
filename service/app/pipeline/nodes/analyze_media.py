@@ -104,8 +104,14 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     sheets = SheetsTool(settings)
-    drive = DriveTool(settings)
-    resolver = AttachmentResolver(drive)
+    try:
+        drive = DriveTool(settings)
+        resolver = AttachmentResolver(drive)
+    except Exception as e:
+        state.setdefault("logs", []).append(f"analyze_media: Drive init failed (non-fatal): {e}")
+        state["media_images"] = []
+        return state
+
     db = DBTool(settings.database_url)
 
     do_caption = bool(getattr(settings, "vision_api_key", "").strip())
@@ -130,6 +136,11 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         tenant_id=tenant_id,
         checkin_id=checkin_id,
         artifact_type="PDF_ATTACHMENT",
+    )
+    existing_image_source_hashes = db.existing_artifact_source_hashes(
+        tenant_id=tenant_id,
+        checkin_id=checkin_id,
+        artifact_type="IMAGE_SOURCE",
     )
 
     # CheckIN inspection image cell
@@ -203,10 +214,28 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         is_pdf = (mime == "application/pdf") or (att.name or "").lower().endswith(".pdf")
         is_img = _is_image_mime(mime)
 
+        # Record the source bytes as an artifact (DB only) for idempotent ingestion bookkeeping.
+        if is_img and source_hash not in existing_image_source_hashes:
+            ok = db.insert_artifact_no_fail(
+                run_id=run_id,
+                artifact_type="IMAGE_SOURCE",
+                url=att.source_ref or att.rel_path or "unknown",
+                meta={
+                    "tenant_id": tenant_id,
+                    "checkin_id": checkin_id,
+                    "source_ref": att.source_ref,
+                    "source_hash": source_hash,
+                    "file_name": att.name,
+                    "mime_type": mime,
+                },
+            )
+            if ok:
+                existing_image_source_hashes.add(source_hash)
+
         if is_pdf:
             if source_hash in existing_pdf_hashes:
                 continue
-            db.insert_artifact(
+            db.insert_artifact_no_fail(
                 run_id=run_id,
                 artifact_type="PDF_ATTACHMENT",
                 url=att.source_ref or att.rel_path or "unknown",
@@ -219,6 +248,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "mime_type": mime,
                 },
             )
+
             existing_pdf_hashes.add(source_hash)
             pdf_line = f"PDF: {att.name or 'attachment'} (no text extracted)"
             new_captions.append(pdf_line)
@@ -250,7 +280,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     context_hint=context_hint,
                 ).strip()
 
-                db.insert_artifact(
+                db.insert_artifact_no_fail(
                     run_id=run_id,
                     artifact_type="IMAGE_CAPTION",
                     url=att.source_ref or att.rel_path or "unknown",
@@ -265,6 +295,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                         "vision_model": getattr(settings, "vision_model", ""),
                     },
                 )
+
                 existing_caption_hashes.add(source_hash)
 
                 if caption:
