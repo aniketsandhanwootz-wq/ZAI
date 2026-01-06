@@ -6,12 +6,18 @@ from io import BytesIO
 import logging
 import re
 
-from google.oauth2.service_account import Credentials
+import os
+import json
+
+from google.oauth2.credentials import Credentials as OAuthCredentials
+from google.auth.transport.requests import Request
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
-from ..config import Settings, parse_service_account_info
+from ..config import Settings
+
 
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -51,9 +57,32 @@ class DriveTool:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-        info = parse_service_account_info(settings.google_service_account_json)
-        creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
+        token_raw = (os.getenv("DRIVE_TOKEN_JSON", "") or "").strip()
+        if not token_raw:
+            raise RuntimeError(
+                "Missing DRIVE_TOKEN_JSON. Generate it using service/scripts/gen_drive_token.py "
+                "and set it in Render env vars."
+            )
+
+        try:
+            token_info = json.loads(token_raw)
+        except Exception as e:
+            raise RuntimeError("DRIVE_TOKEN_JSON is not valid JSON") from e
+
+        creds = OAuthCredentials.from_authorized_user_info(token_info, scopes=DRIVE_SCOPES)
+
+        # Ensure token is usable (refresh if needed)
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                raise RuntimeError(
+                    "DRIVE_TOKEN_JSON credentials are not valid and not refreshable "
+                    "(missing refresh_token or expired). Regenerate token."
+                )
+
         self._svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        self._creds = creds
 
         self.root_folder_id = (getattr(settings, "google_drive_root_folder_id", "") or "").strip()
         self.annotated_root_folder_id = (getattr(settings, "google_drive_annotated_folder_id", "") or "").strip()
