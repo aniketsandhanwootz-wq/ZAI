@@ -80,6 +80,27 @@ def _clean_lines(items: List[Any], *, max_items: int) -> List[str]:
             break
     return out
 
+def _scoped_primary_id_for_run(payload: Dict[str, Any], *, event_type: str, primary_id: str) -> str:
+    """
+    Make idempotency key include "mode" so backfills don't collide with earlier runs.
+
+    Examples:
+      - normal webhook: primary_id stays same
+      - media-only ingest backfill: "<id>::MEDIA_V1"
+      - ingest-only (non-media): "<id>::INGEST_V1"
+    """
+    m = _meta(payload)
+
+    ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply"))
+    media_only = _truthy(m.get("media_only"))
+
+    if ingest_only and media_only:
+        return f"{primary_id}::MEDIA_V1"
+    if ingest_only:
+        return f"{primary_id}::INGEST_V1"
+
+    # Keep default behavior for normal events
+    return primary_id
 
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
     event_type = str(payload.get("event_type") or "UNKNOWN").strip()
@@ -93,7 +114,9 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
 
     runlog = RunLog(settings)
     tenant_id_hint = (_tenant_from_payload(payload) or "UNKNOWN").strip()
-    run_id = runlog.start(tenant_id_hint, event_type, primary_id)
+
+    primary_id_scoped = _scoped_primary_id_for_run(payload, event_type=event_type, primary_id=primary_id)
+    run_id = runlog.start(tenant_id_hint, event_type, primary_id_scoped)
     token = run_id_var.set(run_id)
 
     state: State = {
@@ -101,6 +124,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         "run_id": run_id,
         "event_type": event_type,
         "primary_id": primary_id,
+        "idempotency_primary_id": primary_id_scoped,
         "logs": [],
     }
 

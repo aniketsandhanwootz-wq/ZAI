@@ -10,7 +10,15 @@ def _get_env(name: str, default: Optional[str] = None, required: bool = False) -
     val = os.getenv(name, default)
     if required and (val is None or str(val).strip() == ""):
         raise RuntimeError(f"Missing required env var: {name}")
-    return str(val)
+
+    s = str(val or "")
+    s = s.strip()
+
+    # strip wrapping quotes from .env like KEY="value"
+    if len(s) >= 2 and ((s[0] == s[-1]) and s[0] in ("'", '"')):
+        s = s[1:-1].strip()
+
+    return s
 
 
 _DRIVE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")

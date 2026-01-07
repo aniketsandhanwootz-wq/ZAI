@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from io import BytesIO
 import logging
 import re
-
+from pathlib import Path
 import os
 import json
 
@@ -25,7 +25,34 @@ logger = logging.getLogger("zai.drive")
 
 _DRIVE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
 
+def _load_drive_token_info(token_raw: str) -> dict:
+    """
+    DRIVE_TOKEN_JSON can be either:
+      - raw JSON string (Render env var)
+      - a file path to a JSON file (local dev)
+    """
+    raw = (token_raw or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "Missing DRIVE_TOKEN_JSON. Provide raw JSON OR a path to drive_token.json."
+        )
 
+    # If it looks like JSON, parse directly
+    if raw.startswith("{") and raw.endswith("}"):
+        return json.loads(raw)
+
+    # Otherwise treat as a path
+    p = raw
+    try:
+        if os.path.exists(p) and os.path.isfile(p):
+            return json.loads(Path(p).read_text(encoding="utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Failed reading DRIVE_TOKEN_JSON from path: {p}") from e
+
+    raise RuntimeError(
+        "DRIVE_TOKEN_JSON is neither valid JSON nor a readable file path. "
+        f"Got: {raw[:80]}..."
+    )
 def _is_valid_drive_id(v: str) -> bool:
     s = (v or "").strip()
     if not s:
@@ -57,17 +84,8 @@ class DriveTool:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-        token_raw = (os.getenv("DRIVE_TOKEN_JSON", "") or "").strip()
-        if not token_raw:
-            raise RuntimeError(
-                "Missing DRIVE_TOKEN_JSON. Generate it using service/scripts/gen_drive_token.py "
-                "and set it in Render env vars."
-            )
-
-        try:
-            token_info = json.loads(token_raw)
-        except Exception as e:
-            raise RuntimeError("DRIVE_TOKEN_JSON is not valid JSON") from e
+        token_raw = os.getenv("DRIVE_TOKEN_JSON", "") or ""
+        token_info = _load_drive_token_info(token_raw)
 
         creds = OAuthCredentials.from_authorized_user_info(token_info, scopes=DRIVE_SCOPES)
 

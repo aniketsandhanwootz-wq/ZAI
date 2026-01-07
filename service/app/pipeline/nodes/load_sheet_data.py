@@ -162,7 +162,15 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     insp_cell = _find_row_value(
         checkin_row or {},
         preferred_key=k_ci_insp_img,
-        fallbacks=["Inspection Image", "Inspection Images", "CheckIn Image", "CheckIn Images", "Image", "Images"],
+        fallbacks=[
+            "Inspection Image URL",
+            "Inspection Image",
+            "Inspection Images",
+            "CheckIn Image",
+            "CheckIn Images",
+            "Image",
+            "Images",
+        ],
     )
 
     state["checkin_created_by"] = created_by or None

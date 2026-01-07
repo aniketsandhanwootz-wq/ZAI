@@ -47,13 +47,19 @@ def _collect_photo_cells_from_additional_rows(rows: List[Dict[str, Any]]) -> Lis
             kk = (k or "").strip()
             if not kk:
                 continue
-            if kk.startswith("photo"):
-                cell = _norm_value(v)
-                if not cell:
-                    continue
-                for ref in split_cell_refs(cell):
-                    if _looks_like_media_ref(ref):
-                        refs.append(ref)
+
+            kk_l = kk.lower().strip()
+            # Your sheet headers: Photo, Photo 2, Photo 3...
+            if not kk_l.startswith("photo"):
+                continue
+
+            cell = _norm_value(v)
+            if not cell:
+                continue
+
+            for ref in split_cell_refs(cell):
+                if _looks_like_media_ref(ref):
+                    refs.append(ref)
     return refs
 
 
@@ -166,14 +172,24 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         (state.get("logs") or []).append(f"analyze_media: conversation photo parse failed (non-fatal): {e}")
 
-    # Additional photos sheet
+    # Additional photos sheet (separate spreadsheet)
     add_refs: List[str] = []
     try:
-        add_sheet_id = getattr(settings, "additional_photos_spreadsheet_id", "") or ""
-        add_tab = getattr(settings, "additional_photos_tab_name", "Checkin Additional photos")
-        sheets_add = SheetsTool(settings, spreadsheet_id=add_sheet_id)
+        from dataclasses import replace
+
+        add_sheet_id = (getattr(settings, "additional_photos_spreadsheet_id", "") or "").strip()
+        add_tab = (getattr(settings, "additional_photos_tab_name", "Checkin Additional photos") or "").strip()
+
+        # Make a settings clone so SheetsTool uses the additional spreadsheet id
+        settings_add = replace(settings, spreadsheet_id=add_sheet_id) if add_sheet_id else settings
+        sheets_add = SheetsTool(settings_add)
+
         add_rows = sheets_add.list_additional_photos_for_checkin(checkin_id, tab_name=add_tab)
         add_refs = _collect_photo_cells_from_additional_rows(add_rows)
+
+        (state.get("logs") or []).append(
+            f"analyze_media: additional_photos rows={len(add_rows or [])} refs={len(add_refs)} tab='{add_tab}'"
+        )
     except Exception as e:
         (state.get("logs") or []).append(f"analyze_media: additional photos read failed (non-fatal): {e}")
         add_refs = []
