@@ -57,21 +57,28 @@ def _norm_header(s: str) -> str:
 
 def _find_row_value(row: Dict[str, Any], *, preferred_key: Optional[str], fallbacks: List[str]) -> str:
     """
-    Try mapping-key first (preferred_key already _key()-normalized),
-    else try matching fallback headers by normalized string.
+    Return the first NON-EMPTY value.
+    - Try preferred_key first
+    - Then try fallback headers
     """
     if not row:
         return ""
 
+    # 1) preferred_key
     if preferred_key and preferred_key in row:
-        return _norm_value(row.get(preferred_key, ""))
+        v = _norm_value(row.get(preferred_key, ""))
+        if v:  # ✅ skip empty
+            return v
 
-    # build normalized lookup
+    # 2) fallbacks (first non-empty wins)
     norm_map = {_norm_header(k): k for k in row.keys()}
     for fb in fallbacks:
         k = norm_map.get(_norm_header(fb))
-        if k:
-            return _norm_value(row.get(k, ""))
+        if not k:
+            continue
+        v = _norm_value(row.get(k, ""))
+        if v:  # ✅ skip empty
+            return v
 
     return ""
 
