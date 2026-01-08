@@ -89,6 +89,20 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     sheets = SheetsTool(settings)
     payload = state.get("payload") or {}
 
+    # -------------------------
+    # ✅ Meta flags / overrides (important for admin media backfill)
+    # -------------------------
+    meta = payload.get("meta") or {}
+    state["meta"] = meta
+
+    # Flags can be passed either at top-level or inside meta
+    state["ingest_only"] = bool(meta.get("ingest_only") or payload.get("ingest_only") or False)
+    state["media_only"] = bool(meta.get("media_only") or payload.get("media_only") or False)
+
+    # Allow tenant override (admin media backfill resolves tenant up-front)
+    meta_tenant_id = _norm_value(str(meta.get("tenant_id") or ""))
+    if meta_tenant_id:
+        state["tenant_id"] = meta_tenant_id
     checkin_id = payload.get("checkin_id")
     conversation_id = payload.get("conversation_id")
     ccp_id = payload.get("ccp_id")
@@ -209,14 +223,45 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
 
     state["checkin_image_urls"] = urls
     # -------------------------
-    # Resolve tenant_id via Project sheet (still used for DB / vectors)
-    tenant_id = ""
+    # ✅ Resolve tenant_id via Project sheet (ID-first, then fallback triplet)
+    # -------------------------
+    tenant_id = _norm_value(str(state.get("tenant_id") or ""))  # may be pre-set by meta override
     project_row = None
-    if project_name and part_number and legacy_id:
-        project_row = sheets.get_project_row(project_name, part_number, legacy_id)
+
+    if not tenant_id:
+        # 1) ID-first: match Project.ID (legacy_id) (same as history_ingest approach)
+        if legacy_id:
+            try:
+                projects = sheets.list_projects()
+                k_p_legacy = _key(sheets.map.col("project", "legacy_id"))
+                for pr in projects:
+                    pid = _norm_value((pr or {}).get(k_p_legacy, ""))
+                    if pid and _key(pid) == _key(str(legacy_id)):
+                        project_row = pr
+                        break
+            except Exception:
+                project_row = None
+
+        # 2) Fallback: original triplet lookup
+        if not project_row and project_name and part_number and legacy_id:
+            project_row = sheets.get_project_row(project_name, part_number, legacy_id)
+
         if project_row:
             k_tenant = _key(sheets.map.col("project", "company_row_id"))
             tenant_id = _norm_value(project_row.get(k_tenant, ""))
+
+            # Fill missing values from project row (nice-to-have)
+            try:
+                k_pname = _key(sheets.map.col("project", "project_name"))
+                k_ppart = _key(sheets.map.col("project", "part_number"))
+                if not project_name:
+                    project_name = _norm_value(project_row.get(k_pname, ""))
+                if not part_number:
+                    part_number = _norm_value(project_row.get(k_ppart, ""))
+                state["project_name"] = project_name or None
+                state["part_number"] = part_number or None
+            except Exception:
+                pass
 
     state["project_row"] = project_row
     state["tenant_id"] = tenant_id or None

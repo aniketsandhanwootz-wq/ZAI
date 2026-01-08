@@ -42,3 +42,4 @@ glide_test.py
 
 service/scripts/credentials.json
 service/scripts/drive_token.json
+service/drive_token.json

@@ -128,8 +128,46 @@ def admin_ingest(
         from .tools.sheets_tool import SheetsTool, _key, _norm_value
 
         sheets = SheetsTool(settings)
-        col_checkin_id = sheets.map.col("checkin", "checkin_id")
-        k_checkin_id = _key(col_checkin_id)
+
+        # ---- CheckIN mapping keys ----
+        k_ci_checkin_id = _key(sheets.map.col("checkin", "checkin_id"))
+        k_ci_legacy_id = _key(sheets.map.col("checkin", "legacy_id"))
+        k_ci_project = _key(sheets.map.col("checkin", "project_name"))
+        k_ci_part = _key(sheets.map.col("checkin", "part_number"))
+
+        # ---- Project mapping keys ----
+        k_p_legacy = _key(sheets.map.col("project", "legacy_id"))
+        k_p_tenant = _key(sheets.map.col("project", "company_row_id"))
+        k_p_name = _key(sheets.map.col("project", "project_name"))
+        k_p_part = _key(sheets.map.col("project", "part_number"))
+
+        # Build project indexes ONCE (ID-first + fallback triplet)
+        projects = sheets.list_projects()
+
+        project_by_id: Dict[str, Dict[str, str]] = {}
+        project_by_triplet: Dict[tuple[str, str, str], Dict[str, str]] = {}
+
+        for pr in projects:
+            pid = _norm_value((pr or {}).get(k_p_legacy, ""))
+            tenant_id = _norm_value((pr or {}).get(k_p_tenant, ""))
+            pname = _norm_value((pr or {}).get(k_p_name, ""))
+            pnum = _norm_value((pr or {}).get(k_p_part, ""))
+
+            if pid:
+                project_by_id[_key(pid)] = {
+                    "tenant_id": tenant_id,
+                    "project_name": pname,
+                    "part_number": pnum,
+                    "legacy_id": pid,
+                }
+
+            if pid and pname and pnum:
+                project_by_triplet[(_key(pname), _key(pnum), _key(pid))] = {
+                    "tenant_id": tenant_id,
+                    "project_name": pname,
+                    "part_number": pnum,
+                    "legacy_id": pid,
+                }
 
         rows = sheets.list_checkins()
         if limit and limit > 0:
@@ -138,12 +176,46 @@ def admin_ingest(
         seen = 0
         ok = 0
         err = 0
+        skipped_missing_checkin_id = 0
+        skipped_missing_legacy_id = 0
+        skipped_missing_tenant = 0
+
         err_samples: list[dict[str, str]] = []
+        missing_tenant_samples: list[dict[str, str]] = []
 
         for r in rows:
             seen += 1
-            checkin_id = _norm_value((r or {}).get(k_checkin_id, ""))
+
+            checkin_id = _norm_value((r or {}).get(k_ci_checkin_id, ""))
             if not checkin_id:
+                skipped_missing_checkin_id += 1
+                continue
+
+            legacy_id = _norm_value((r or {}).get(k_ci_legacy_id, ""))
+            project_name = _norm_value((r or {}).get(k_ci_project, ""))
+            part_number = _norm_value((r or {}).get(k_ci_part, ""))
+
+            if not legacy_id:
+                skipped_missing_legacy_id += 1
+                continue
+
+            # Resolve tenant (ID-first, same spirit as history_ingest)
+            proj = project_by_id.get(_key(legacy_id))
+            if not proj and project_name and part_number:
+                proj = project_by_triplet.get((_key(project_name), _key(part_number), _key(legacy_id)))
+
+            tenant_id = _norm_value((proj or {}).get("tenant_id", ""))
+            if not tenant_id:
+                skipped_missing_tenant += 1
+                if len(missing_tenant_samples) < 25:
+                    missing_tenant_samples.append(
+                        {
+                            "checkin_id": checkin_id,
+                            "legacy_id": legacy_id,
+                            "project_name": project_name,
+                            "part_number": part_number,
+                        }
+                    )
                 continue
 
             out = run_event_graph(
@@ -151,25 +223,40 @@ def admin_ingest(
                 {
                     "event_type": "CHECKIN_UPDATED",
                     "checkin_id": checkin_id,
-                    "meta": {"ingest_only": True, "media_only": True},
+                    "legacy_id": legacy_id,
+                    "meta": {
+                        "ingest_only": True,
+                        "media_only": True,
+                        "tenant_id": tenant_id,  # ✅ key fix
+                    },
                 },
             )
+
             if out.get("ok"):
                 ok += 1
             else:
                 err += 1
                 if len(err_samples) < 20:
-                    err_samples.append({"checkin_id": checkin_id, "error": str(out.get("error") or "")[:300]})
+                    err_samples.append(
+                        {
+                            "checkin_id": checkin_id,
+                            "legacy_id": legacy_id,
+                            "error": str(out.get("error") or "")[:300],
+                        }
+                    )
 
         results["media"] = {
             "source": "media",
             "rows_seen": seen,
             "runs_ok": ok,
             "runs_error": err,
+            "skipped_missing_checkin_id": skipped_missing_checkin_id,
+            "skipped_missing_legacy_id": skipped_missing_legacy_id,
+            "skipped_missing_tenant": skipped_missing_tenant,
+            "missing_tenant_samples": missing_tenant_samples,
             "error_samples": err_samples,
-            "note": "Uses ingest-only media-only pipeline (captions + MEDIA vector).",
+            "note": "Media backfill runs CHECKIN_UPDATED with meta.tenant_id + ingest_only/media_only for stable tenant resolution.",
         }
-
     if source == "projects":
         results["projects"] = {"note": "No separate projects table in MVP; we look up Project row on-demand."}
 
