@@ -55,13 +55,15 @@ columns:
     update_message: "Update Message"
 
 writeback:
-  # where the AI reply will be written
   ai_comment:
     tab: "Conversation"
     set_columns:
+      conversation_id: "Conversation ID"
       checkin_id: "CheckIn ID"
       photos: "Photo"
       remark: "Remarks"
       status: "Status"
-    remark_prefix: "[AI] "
+      added_by: "Added by"
+      timestamp: "Timestamp"
+    remark_prefix: "[ZAI] "
     default_status_from_checkin: true
