@@ -10,10 +10,25 @@ from googleapiclient.errors import HttpError
 
 from ..config import Settings, parse_service_account_info
 from .mapping_tool import load_sheet_mapping, SheetMapping
-
+import secrets
+import string
+from datetime import datetime
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
+_ALPHANUM = string.ascii_letters + string.digits
 
+def _rand_conversation_id(n: int = 10) -> str:
+    # Similar style to AppSheet-like IDs (alphanumeric)
+    return "".join(secrets.choice(_ALPHANUM) for _ in range(n))
+
+def _now_timestamp_str() -> str:
+    # Match sheet style like: 01/07/26 12:49 PM
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.now(ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        dt = datetime.now()
+    return dt.strftime("%m/%d/%y %I:%M %p")
 def _norm_header(x: object) -> str:
     """
     Normalize sheet header cells:
@@ -253,23 +268,37 @@ class SheetsTool:
 
     # ---------- Writeback ----------
 
-    def append_conversation_ai_comment(self, checkin_id: str, remark: str, status: str, photos: str) -> None:
+    def append_conversation_ai_comment(
+        self,
+        checkin_id: str,
+        remark: str,
+        status: str,
+        photos: str,
+        conversation_id: Optional[str] = None,
+        added_by: str = "zai@wootz.work",
+        timestamp: Optional[str] = None,
+    ) -> None:
         """
         Adds a new row into Conversation tab using mapping.writeback.ai_comment
+    
+        NEW:
+          - conversation_id: auto-generated if not provided
+          - added_by: defaults to zai@wootz.work
+          - timestamp: auto-generated in Asia/Kolkata format if not provided
         """
         wb = self.map.writeback.get("ai_comment", {})
         tab_name = wb.get("tab", self.map.tab("conversation"))
         set_cols = wb.get("set_columns", {})
-
+    
         t = self._table("conversation")
         headers: List[str] = t.get("headers", [])
         idx: Dict[str, int] = t.get("idx", {})
         if not headers:
             raise RuntimeError("Conversation tab has no header row")
-
+    
         prefix = wb.get("remark_prefix", "")
         row: List[Any] = [""] * len(headers)
-
+    
         def set_if_exists(mapped_col_key: str, val: str):
             col_name = set_cols.get(mapped_col_key)
             if not col_name:
@@ -277,12 +306,21 @@ class SheetsTool:
             k = _key(col_name)
             if k in idx:
                 row[idx[k]] = val
-
+    
+        # ---- NEW defaults ----
+        cid = (conversation_id or "").strip() or _rand_conversation_id()
+        ab = (added_by or "").strip() or "zai@wootz.work"
+        ts = (timestamp or "").strip() or _now_timestamp_str()
+    
+        # ---- Write mapped columns ----
+        set_if_exists("conversation_id", cid)
         set_if_exists("checkin_id", str(checkin_id))
         set_if_exists("photos", str(photos or ""))
         set_if_exists("remark", f"{prefix}{remark}")
         set_if_exists("status", str(status or ""))
-
+        set_if_exists("added_by", ab)
+        set_if_exists("timestamp", ts)
+    
         self._append_values(f"{tab_name}!A:ZZ", [row])
         self.refresh_cache("conversation")
 
