@@ -68,6 +68,49 @@ _ALLOWED_EVENT_TYPES = {
     "MANUAL_TRIGGER",
 }
 
+def _primary_id_for_event(payload: Dict[str, Any], event_type: str) -> str:
+    """
+    Idempotency primary_id MUST be the entity's own unique id:
+      - CHECKIN_*            -> checkin_id
+      - CONVERSATION_ADDED   -> conversation_id (NOT checkin_id)
+      - CCP_UPDATED          -> ccp_id
+      - DASHBOARD_UPDATED    -> dashboard_update_id / row_id (NOT legacy_id)
+      - MANUAL_TRIGGER       -> meta.primary_id if provided else fallback
+    """
+    event_type = (event_type or "").strip()
+
+    checkin_id = str(payload.get("checkin_id") or "").strip()
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    ccp_id = str(payload.get("ccp_id") or "").strip()
+
+    # Dashboard update unique id: prefer explicit payload, else row_id variants
+    dashboard_row_id = str(
+        payload.get("dashboard_update_id")
+        or payload.get("dashboard_row_id")
+        or payload.get("row_id")
+        or ""
+    ).strip()
+
+    legacy_id = str(payload.get("legacy_id") or "").strip()
+
+    if event_type in ("CHECKIN_CREATED", "CHECKIN_UPDATED"):
+        return checkin_id or "UNKNOWN_CHECKIN"
+
+    if event_type == "CONVERSATION_ADDED":
+        # THIS is the key fix
+        return conversation_id or "UNKNOWN_CONVO"
+
+    if event_type == "CCP_UPDATED":
+        return ccp_id or "UNKNOWN_CCP"
+
+    if event_type == "DASHBOARD_UPDATED":
+        # prefer the actual Row ID trigger
+        return dashboard_row_id or legacy_id or "UNKNOWN_DASH"
+
+    # MANUAL / fallback
+    m = _meta(payload)
+    meta_primary = str(m.get("primary_id") or "").strip()
+    return meta_primary or checkin_id or conversation_id or ccp_id or dashboard_row_id or legacy_id or "UNKNOWN"
 
 def _clean_lines(items: List[Any], *, max_items: int) -> List[str]:
     out: List[str] = []
@@ -104,13 +147,7 @@ def _scoped_primary_id_for_run(payload: Dict[str, Any], *, event_type: str, prim
 
 def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, Any]:
     event_type = str(payload.get("event_type") or "UNKNOWN").strip()
-    primary_id = str(
-        payload.get("checkin_id")
-        or payload.get("conversation_id")
-        or payload.get("ccp_id")
-        or payload.get("legacy_id")
-        or "UNKNOWN"
-    ).strip()
+    primary_id = _primary_id_for_event(payload, event_type)
 
     runlog = RunLog(settings)
     tenant_id_hint = (_tenant_from_payload(payload) or "UNKNOWN").strip()
@@ -172,17 +209,39 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         # Dashboard incremental ingestion
         # ------------------------------
         if event_type == "DASHBOARD_UPDATED":
+            dashboard_row_id = str(
+                payload.get("dashboard_update_id")
+                or payload.get("dashboard_row_id")
+                or payload.get("row_id")
+                or ""
+            ).strip()
+
+            # Prefer Row ID ingestion (correct trigger)
+            if dashboard_row_id:
+                from .ingest.dashboard_ingest import ingest_dashboard_one_by_row_id
+
+                out = ingest_dashboard_one_by_row_id(settings, dashboard_row_id=dashboard_row_id)
+                runlog.success(run_id)
+                return {
+                    "run_id": run_id,
+                    "ok": True,
+                    "event_type": event_type,
+                    "dashboard_row_id": dashboard_row_id,
+                    "result": out,
+                    "logs": state.get("logs"),
+                }
+
+            # Fallback to legacy_id ingestion (older payloads)
             legacy_id = str(payload.get("legacy_id") or "").strip()
             if not legacy_id:
                 runlog.success(run_id)
-                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing legacy_id", "logs": state.get("logs")}
+                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing dashboard_row_id and legacy_id", "logs": state.get("logs")}
 
             from .ingest.dashboard_ingest import ingest_dashboard_one
 
             out = ingest_dashboard_one(settings, legacy_id=legacy_id)
             runlog.success(run_id)
             return {"run_id": run_id, "ok": True, "event_type": event_type, "legacy_id": legacy_id, "result": out, "logs": state.get("logs")}
-
         # -------------------------
         # Checkin / Conversation flow
         # -------------------------

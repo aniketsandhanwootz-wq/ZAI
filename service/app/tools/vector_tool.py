@@ -302,7 +302,31 @@ class VectorTool:
                     h,
                 ),
             )
+    def get_company_profile_by_tenant_row_id(self, *, tenant_row_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the exact company profile by tenant_row_id.
+        This is the correct behavior when tenant_id is known.
+        """
+        tid = (tenant_row_id or "").strip()
+        if not tid:
+            return None
 
+        sql = """
+        SELECT tenant_row_id, company_name, company_description
+        FROM company_vectors
+        WHERE tenant_row_id=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, (tid,))
+            r = cur.fetchone()
+            if not r:
+                return None
+            return {
+                "tenant_row_id": r.get("tenant_row_id"),
+                "company_name": r.get("company_name") or "",
+                "company_description": r.get("company_description") or "",
+            }
     def search_company_profiles(
         self,
         *,

@@ -49,11 +49,12 @@ columns:
     status: "Status"
 
   dashboard_update:
+    dashboard_update_id: "Row ID"
     project_name: "Project Name"
     part_number: "Part Number"
     legacy_id: "ID"
     update_message: "Update Message"
-
+    
 writeback:
   ai_comment:
     tab: "Conversation"

@@ -35,19 +35,40 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
 
     q = embedder.embed_query(text)
 
-    # 0) Company profile vector (client constraints)
+    # 0) Company profile (tenant-scoped when tenant_id is known)
+    # tenant_id == company_row_id (Glide $rowID) per your Flow 1 truth
     try:
-        company_matches = vector_db.search_company_profiles(query_embedding=q, top_k=1)
-        state["company_profile_matches"] = company_matches
-        if company_matches:
-            best = company_matches[0]
-            state["company_profile_text"] = (
-                f"Company: {best.get('company_name')}\nClient description: {best.get('company_description')}"
-            ).strip()
+        if tenant_id:
+            row = vector_db.get_company_profile_by_tenant_row_id(tenant_row_id=tenant_id)
+            if row:
+                state["company_profile_matches"] = [
+                    {
+                        "tenant_row_id": row.get("tenant_row_id"),
+                        "company_name": row.get("company_name"),
+                        "company_description": row.get("company_description"),
+                        "distance": 0.0,
+                        "mode": "tenant_exact",
+                    }
+                ]
+                state["company_profile_text"] = (
+                    f"Company: {row.get('company_name','')}\n"
+                    f"Client description: {row.get('company_description','')}"
+                ).strip()
+            else:
+                state["company_profile_matches"] = []
+        else:
+            # Fallback only when tenant_id missing
+            company_matches = vector_db.search_company_profiles(query_embedding=q, top_k=1)
+            state["company_profile_matches"] = company_matches
+            if company_matches:
+                best = company_matches[0]
+                state["company_profile_text"] = (
+                    f"Company: {best.get('company_name')}\nClient description: {best.get('company_description')}"
+                ).strip()
     except Exception as e:
-        (state.get("logs") or []).append(f"Company vector search failed (non-fatal): {e}")
+        (state.get("logs") or []).append(f"Company profile retrieval failed (non-fatal): {e}")
         state["company_profile_matches"] = []
-
+        
     project_name = state.get("project_name")
     part_number = state.get("part_number")
 
