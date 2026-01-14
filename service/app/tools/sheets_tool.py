@@ -132,6 +132,60 @@ class SheetsTool:
             )
         )
 
+    def _update_values(self, range_a1: str, rows: List[List[Any]]) -> None:
+        self._retryable_execute(
+            lambda: (
+                self._svc.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=self._sheet_id,
+                    range=range_a1,
+                    valueInputOption="USER_ENTERED",
+                    body={"values": rows},
+                )
+                .execute()
+            )
+        )
+
+    def update_project_cell_by_legacy_id(self, legacy_id: str, *, column_name: str, value: str) -> bool:
+        """
+        Updates a SINGLE cell in Project tab for the row where Project.ID == legacy_id.
+        Returns True if updated, False if row not found.
+        """
+        t = self._table("project")
+        if not t["headers"]:
+            return False
+
+        tab_name = t["tab_name"]
+
+        col_id = self.map.col("project", "legacy_id")
+        iid = self._idx(t, col_id, "project")
+        ic = self._idx(t, column_name, "project")  # validates column exists
+
+        want = _key(legacy_id)
+
+        # rows are values[1:], so sheet row number = index_in_rows + 2
+        for i, r in enumerate(t["rows"]):
+            if iid < len(r) and _key(r[iid]) == want:
+                sheet_row = i + 2
+
+                # Convert 0-based col index -> A1 column letters
+                col_num = ic + 1
+                letters = ""
+                n = col_num
+                while n > 0:
+                    n, rem = divmod(n - 1, 26)
+                    letters = chr(65 + rem) + letters
+
+                a1 = f"{tab_name}!{letters}{sheet_row}"
+                self._update_values(a1, [[value]])
+
+                # refresh cache so next reads see new value
+                self.refresh_cache("project")
+                return True
+
+        return False
+    # ---------- Table and row helpers ----------
     def _table(self, tab_key: str) -> Dict[str, Any]:
         """
         Load and cache table scan for a tab_key.
@@ -181,6 +235,22 @@ class SheetsTool:
             raise RuntimeError(f"Tab '{self.map.tab(tab_key)}' missing column: '{col_name}'")
         return int(idx[k])
 
+    def get_project_by_legacy_id(self, legacy_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Returns Project row dict by legacy ID (Project.ID).
+        """
+        t = self._table("project")
+        if not t["headers"]:
+            return None
+
+        col_id = self.map.col("project", "legacy_id")
+        iid = self._idx(t, col_id, "project")
+        want = _key(legacy_id)
+
+        for r in t["rows"]:
+            if iid < len(r) and _key(r[iid]) == want:
+                return self._row_to_dict(t, r)
+        return None
     # ---------- Domain readers ----------
 
     def list_dashboard_updates(self) -> List[Dict[str, Any]]:

@@ -37,7 +37,7 @@ rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run"
 generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
 annotate_media = _resolve_node(".nodes.annotate_media", ["annotate_media", "run", "node"])
 writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
-
+generate_assembly_todo = _resolve_node(".nodes.generate_assembly_todo", ["generate_assembly_todo", "run", "node"])
 
 def _tenant_from_payload(payload: Dict[str, Any]) -> str:
     rmeta = payload.get("meta") or {}
@@ -65,6 +65,7 @@ _ALLOWED_EVENT_TYPES = {
     "CONVERSATION_ADDED",
     "CCP_UPDATED",
     "DASHBOARD_UPDATED",
+    "PROJECT_UPDATED",   # NEW (cron/status->mfg trigger)
     "MANUAL_TRIGGER",
 }
 
@@ -93,6 +94,9 @@ def _primary_id_for_event(payload: Dict[str, Any], event_type: str) -> str:
 
     legacy_id = str(payload.get("legacy_id") or "").strip()
 
+    if event_type == "PROJECT_UPDATED":
+        return legacy_id or "UNKNOWN_PROJECT"
+    
     if event_type in ("CHECKIN_CREATED", "CHECKIN_UPDATED"):
         return checkin_id or "UNKNOWN_CHECKIN"
 
@@ -202,6 +206,12 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             from .ingest.ccp_ingest import ingest_ccp_one
 
             out = ingest_ccp_one(settings, ccp_id=ccp_id)
+            # Also refresh assembly checklist if project is already in MFG
+            try:
+                state["payload"] = payload
+                state = _timed("generate_assembly_todo", generate_assembly_todo)
+            except Exception as _e:
+                (state.get("logs") or []).append(f"assembly_todo: non-fatal after CCP_UPDATED: {_e}")
             runlog.success(run_id)
             return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
 
@@ -242,6 +252,22 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             out = ingest_dashboard_one(settings, legacy_id=legacy_id)
             runlog.success(run_id)
             return {"run_id": run_id, "ok": True, "event_type": event_type, "legacy_id": legacy_id, "result": out, "logs": state.get("logs")}
+
+        # -------------------------
+        # Project status trigger (cron -> mfg)
+        # -------------------------
+        if event_type == "PROJECT_UPDATED":
+            # payload should contain legacy_id (Project.ID)
+            state = _timed("generate_assembly_todo", generate_assembly_todo)
+            runlog.success(run_id)
+            return {
+                "run_id": run_id,
+                "ok": True,
+                "event_type": event_type,
+                "legacy_id": str(payload.get("legacy_id") or "").strip(),
+                "assembly_todo_written": state.get("assembly_todo_written"),
+                "logs": state.get("logs"),
+            }
         # -------------------------
         # Checkin / Conversation flow
         # -------------------------
@@ -255,6 +281,13 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         media_only = _truthy(m.get("media_only"))
 
         state = _timed("load_sheet_data", load_sheet_data)
+
+        # Always try to refresh assembly checklist after any relevant event.
+        # Node itself will skip unless Project.Status_assembly == 'mfg'.
+        try:
+            state = _timed("generate_assembly_todo", generate_assembly_todo)
+        except Exception as _e:
+            (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
 
         tenant_id = str(state.get("tenant_id") or "").strip()
         if tenant_id and tenant_id != tenant_id_hint:

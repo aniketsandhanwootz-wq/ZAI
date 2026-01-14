@@ -28,6 +28,10 @@ columns:
     dispatch_date: "Dispatch date"
     company_row_id: "Company row id"
     legacy_id: "ID"
+    # NEW (project status + checklist writeback)
+    status_assembly: "Status_assembly"
+    ai_critcal_point: "ai_critcal_point"
+
 
   ccp:
     ccp_id: "CCP ID"
