@@ -11,8 +11,13 @@ class WebhookPayload(BaseModel):
         "CONVERSATION_ADDED",
         "CCP_UPDATED",
         "DASHBOARD_UPDATED",
+        "PROJECT_UPDATED",   # NEW
         "MANUAL_TRIGGER",
     ]
+
+    # Used by PROJECT_UPDATED and also helpful across flows
+    legacy_id: Optional[str] = None
+
     checkin_id: Optional[str] = None
     conversation_id: Optional[str] = None
     ccp_id: Optional[str] = None
@@ -24,5 +29,4 @@ class WebhookPayload(BaseModel):
     dashboard_row_id: Optional[str] = None
     row_id: Optional[str] = None
 
-    legacy_id: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None

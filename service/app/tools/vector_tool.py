@@ -373,6 +373,7 @@ class VectorTool:
         top_k: int = 30,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
+        legacy_id: Optional[str] = None,   # NEW
         vector_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         where = ["tenant_id=%s"]
@@ -389,6 +390,10 @@ class VectorTool:
         if part_number:
             where.append("part_number=%s")
             args.append(part_number)
+
+        if legacy_id:
+            where.append("legacy_id=%s")
+            args.append(legacy_id)
 
         sql = f"""
         SELECT
@@ -433,6 +438,7 @@ class VectorTool:
         top_k: int = 30,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
+        legacy_id: Optional[str] = None,   # NEW
     ) -> List[Dict[str, Any]]:
         where = ["tenant_id=%s"]
         args: List[Any] = [tenant_id]
@@ -444,6 +450,10 @@ class VectorTool:
         if part_number:
             where.append("(part_number=%s OR part_number IS NULL)")
             args.append(part_number)
+
+        if legacy_id:
+            where.append("(legacy_id=%s OR legacy_id IS NULL)")
+            args.append(legacy_id)
 
         sql = f"""
         SELECT
@@ -478,6 +488,7 @@ class VectorTool:
         top_k: int = 20,
         project_name: Optional[str] = None,
         part_number: Optional[str] = None,
+        legacy_id: Optional[str] = None,   # NEW
     ) -> List[Dict[str, Any]]:
         where = ["tenant_id=%s"]
         args: List[Any] = [tenant_id]
@@ -490,6 +501,10 @@ class VectorTool:
             where.append("(part_number=%s OR part_number IS NULL)")
             args.append(part_number)
 
+        if legacy_id:
+            where.append("(legacy_id=%s OR legacy_id IS NULL)")
+            args.append(legacy_id)
+            
         sql = f"""
         SELECT
           update_message,

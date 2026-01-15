@@ -231,6 +231,14 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                 from .ingest.dashboard_ingest import ingest_dashboard_one_by_row_id
 
                 out = ingest_dashboard_one_by_row_id(settings, dashboard_row_id=dashboard_row_id)
+
+                # Also refresh assembly checklist if project is already in MFG
+                try:
+                    state["payload"] = payload
+                    state = _timed("generate_assembly_todo", generate_assembly_todo)
+                except Exception as _e:
+                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(row_id): {_e}")
+
                 runlog.success(run_id)
                 return {
                     "run_id": run_id,
@@ -238,6 +246,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "event_type": event_type,
                     "dashboard_row_id": dashboard_row_id,
                     "result": out,
+                    "assembly_todo_written": state.get("assembly_todo_written"),
                     "logs": state.get("logs"),
                 }
 
@@ -250,9 +259,24 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             from .ingest.dashboard_ingest import ingest_dashboard_one
 
             out = ingest_dashboard_one(settings, legacy_id=legacy_id)
-            runlog.success(run_id)
-            return {"run_id": run_id, "ok": True, "event_type": event_type, "legacy_id": legacy_id, "result": out, "logs": state.get("logs")}
 
+            # Also refresh assembly checklist if project is already in MFG
+            try:
+                state["payload"] = payload
+                state = _timed("generate_assembly_todo", generate_assembly_todo)
+            except Exception as _e:
+                (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(legacy_id): {_e}")
+
+            runlog.success(run_id)
+            return {
+                "run_id": run_id,
+                "ok": True,
+                "event_type": event_type,
+                "legacy_id": legacy_id,
+                "result": out,
+                "assembly_todo_written": state.get("assembly_todo_written"),
+                "logs": state.get("logs"),
+            }
         # -------------------------
         # Project status trigger (cron -> mfg)
         # -------------------------

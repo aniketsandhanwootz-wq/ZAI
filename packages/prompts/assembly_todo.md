@@ -8,11 +8,17 @@ Hard rules:
 - Each line MUST start with: "- [ ] "
 - Each item must be ONE actionable verification step (not a paragraph).
 - Use only the provided context. If something is missing/unknown, write it explicitly as "(unknown)" instead of guessing.
-- Do NOT include any headings, explanations, or extra text. Only the checklist lines.
+- Do NOT include any headings, explanations, or extra text. Only the checklist lines. But it should be self explanatory.
 - Avoid duplicates and avoid generic items like "ensure quality".
+- Refer from the previous context. Our main goal is to ensure that the User will not do mistake. So we need to check CCP. Process, RM, Boughtouts of that Assembly (ID). Also if similar kind of thing has happened in past.
+
+Update behavior (IMPORTANT):
+- If PREVIOUS_CHECKLIST is present, keep still-relevant open items.
+- Remove items that are clearly already satisfied/closed per the latest context (mention closure evidence briefly in parentheses if needed).
+- Add new items only if the context introduces new risks/requirements.
 
 Focus areas (cover as many as possible within 5–6 items):
-- Latest known issues from CheckIN/Conversation and whether they are closed or still open
+- Latest known issues from history + what actually worked (resolutions)
 - CCP must-haves: critical control points, required proofs (reports/photos), and missing evidence
 - Drawing / revision / assembly intent alignment (if revision info not present, mark unknown)
 - Process readiness: special processes, fixtures/tools, and verification steps
@@ -20,7 +26,6 @@ Focus areas (cover as many as possible within 5–6 items):
 - Final acceptance: what must be validated before dispatch
 
 Now generate the checklist using the context below.
-If the context has zero usable signals, still output 5 items but mark the unknowns explicitly.
 
 CONTEXT:
 {{context}}

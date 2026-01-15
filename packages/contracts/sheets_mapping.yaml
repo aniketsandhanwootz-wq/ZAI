@@ -30,7 +30,7 @@ columns:
     legacy_id: "ID"
     # NEW (project status + checklist writeback)
     status_assembly: "Status_assembly"
-    ai_critcal_point: "ai_critcal_point"
+    ai_critcal_point: "ZAI Recommendations"
 
 
   ccp:
