@@ -15,8 +15,6 @@
 #   python3 service/scripts/backfill_assembly_todo.py
 # Note: This script assumes the existence of certain modules and functions
 # within the service.app package, such as Settings, SheetsTool, and run_event_graph.
-
-
 from __future__ import annotations
 
 import os
