@@ -56,7 +56,112 @@ def _parse_prefix_map(raw: str) -> Dict[str, str]:
     except Exception:
         return {}
 
+def _parse_json_env(raw: str) -> dict:
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
 
+def _deep_get(d: dict, path: list[str], default: str = "") -> str:
+    cur: object = d
+    for p in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(p)
+    if cur is None:
+        return default
+    return str(cur).strip()
+
+def _apply_glide_json_overrides(*, base: dict, fallback_env_get) -> dict:
+    """
+    base: parsed GLIDE_CONFIG_JSON dict
+    fallback_env_get: function(name, default)->str (use _get_env)
+    Returns a dict of overrides for Settings fields (strings).
+    JSON schema (recommended):
+      {
+        "api_key": "...",
+        "app_id": "...",
+        "base_url": "https://api.glideapp.io",
+        "company": {
+          "table": "...",
+          "columns": { "rowid": "$rowID", "name": "Name", "desc": "nszR1" }
+        },
+        "tables": {
+          "raw_material": {
+            "table": "...",
+            "columns": {
+              "tenant": "Project number",
+              "rowid": "$rowID",
+              "project": "Project number",
+              "part_number": "Part number",
+              "legacy_id": "Legacy ID",
+              "project_row_id": "Project Row ID",
+              "title": "Part name"
+            }
+          },
+          "processes": { ... },
+          "boughtouts": { ... }
+        }
+      }
+    """
+    overrides: dict = {}
+
+    # top-level
+    overrides["glide_api_key"] = _deep_get(base, ["api_key"], fallback_env_get("GLIDE_API_KEY", ""))
+    overrides["glide_app_id"] = _deep_get(base, ["app_id"], fallback_env_get("GLIDE_APP_ID", ""))
+    overrides["glide_base_url"] = _deep_get(base, ["base_url"], fallback_env_get("GLIDE_BASE_URL", "https://api.glideapp.io")).rstrip("/")
+
+    # company
+    overrides["glide_company_table"] = _deep_get(base, ["company", "table"], fallback_env_get("GLIDE_COMPANY_TABLE", ""))
+    overrides["glide_company_rowid_column"] = _deep_get(base, ["company", "columns", "rowid"], fallback_env_get("GLIDE_COMPANY_ROWID_COLUMN", "$rowID"))
+    overrides["glide_company_name_column"] = _deep_get(base, ["company", "columns", "name"], fallback_env_get("GLIDE_COMPANY_NAME_COLUMN", "Name"))
+    overrides["glide_company_desc_column"] = _deep_get(base, ["company", "columns", "desc"], fallback_env_get("GLIDE_COMPANY_DESC_COLUMN", "Short client description"))
+
+    # tables helper
+    def t_table(key: str, env_name: str) -> str:
+        return _deep_get(base, ["tables", key, "table"], fallback_env_get(env_name, ""))
+
+    def t_col(key: str, json_col: str, env_name: str, default: str) -> str:
+        return _deep_get(base, ["tables", key, "columns", json_col], fallback_env_get(env_name, default))
+
+    # raw_material
+    overrides["glide_raw_material_table"] = t_table("raw_material", "GLIDE_RAW_MATERIAL_TABLE")
+    overrides["glide_raw_material_tenant_column"] = t_col("raw_material", "tenant", "GLIDE_RAW_MATERIAL_TENANT_COLUMN", "Company Row ID")
+    overrides["glide_raw_material_rowid_column"] = t_col("raw_material", "rowid", "GLIDE_RAW_MATERIAL_ROWID_COLUMN", "$rowID")
+    overrides["glide_raw_material_project_name_column"] = t_col("raw_material", "project", "GLIDE_RAW_MATERIAL_PROJECT_COLUMN", "Project number")
+    overrides["glide_raw_material_part_number_column"] = t_col("raw_material", "part_number", "GLIDE_RAW_MATERIAL_PART_NUMBER_COLUMN", "Part number")
+    overrides["glide_raw_material_legacy_id_column"] = t_col("raw_material", "legacy_id", "GLIDE_RAW_MATERIAL_LEGACY_ID_COLUMN", "Legacy ID")
+    overrides["glide_raw_material_project_row_id_column"] = t_col("raw_material", "project_row_id", "GLIDE_RAW_MATERIAL_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    overrides["glide_raw_material_title_column"] = t_col("raw_material", "title", "GLIDE_RAW_MATERIAL_TITLE_COLUMN", "Part name")
+
+    # processes
+    overrides["glide_processes_table"] = t_table("processes", "GLIDE_PROCESSES_TABLE")
+    overrides["glide_processes_tenant_column"] = t_col("processes", "tenant", "GLIDE_PROCESSES_TENANT_COLUMN", "Company Row ID")
+    overrides["glide_processes_rowid_column"] = t_col("processes", "rowid", "GLIDE_PROCESSES_ROWID_COLUMN", "$rowID")
+    overrides["glide_processes_project_name_column"] = t_col("processes", "project", "GLIDE_PROCESSES_PROJECT_COLUMN", "Project name")
+    overrides["glide_processes_part_number_column"] = t_col("processes", "part_number", "GLIDE_PROCESSES_PART_NUMBER_COLUMN", "Part number")
+    overrides["glide_processes_legacy_id_column"] = t_col("processes", "legacy_id", "GLIDE_PROCESSES_LEGACY_ID_COLUMN", "Legacy ID")
+    overrides["glide_processes_project_row_id_column"] = t_col("processes", "project_row_id", "GLIDE_PROCESSES_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    overrides["glide_processes_title_column"] = t_col("processes", "title", "GLIDE_PROCESSES_TITLE_COLUMN", "Process")
+
+    # boughtouts
+    overrides["glide_boughtouts_table"] = t_table("boughtouts", "GLIDE_BOUGHTOUTS_TABLE")
+    overrides["glide_boughtouts_tenant_column"] = t_col("boughtouts", "tenant", "GLIDE_BOUGHTOUTS_TENANT_COLUMN", "Company Row ID")
+    overrides["glide_boughtouts_rowid_column"] = t_col("boughtouts", "rowid", "GLIDE_BOUGHTOUTS_ROWID_COLUMN", "$rowID")
+    overrides["glide_boughtouts_project_name_column"] = t_col("boughtouts", "project", "GLIDE_BOUGHTOUTS_PROJECT_COLUMN", "Project")
+    overrides["glide_boughtouts_part_number_column"] = t_col("boughtouts", "part_number", "GLIDE_BOUGHTOUTS_PART_NUMBER_COLUMN", "Part Number")
+    overrides["glide_boughtouts_legacy_id_column"] = t_col("boughtouts", "legacy_id", "GLIDE_BOUGHTOUTS_LEGACY_ID_COLUMN", "Legacy ID")
+    overrides["glide_boughtouts_project_row_id_column"] = t_col("boughtouts", "project_row_id", "GLIDE_BOUGHTOUTS_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    overrides["glide_boughtouts_title_column"] = t_col("boughtouts", "title", "GLIDE_BOUGHTOUTS_TITLE_COLUMN", "Name")
+
+    # project table (optional)
+    overrides["glide_project_table"] = _deep_get(base, ["tables", "project", "table"], fallback_env_get("GLIDE_PROJECT_TABLE", ""))
+
+    return overrides
 @dataclass(frozen=True)
 class Settings:
     # Core
@@ -196,22 +301,25 @@ def load_settings() -> Settings:
     # ✅ webhook secret: prefer WEBHOOK_SECRET; fallback to old APPSHEET_WEBHOOK_SECRET
     webhook_secret = _get_env("WEBHOOK_SECRET", _get_env("APPSHEET_WEBHOOK_SECRET", ""), required=True)
 
-    # Glide
-    glide_api_key = _get_env("GLIDE_API_KEY", "")
-    glide_app_id = _get_env("GLIDE_APP_ID", "")
-    glide_company_table = _get_env("GLIDE_COMPANY_TABLE", "")
-    glide_company_rowid_column = _get_env("GLIDE_COMPANY_ROWID_COLUMN", "$rowID")
-    glide_company_name_column = _get_env("GLIDE_COMPANY_NAME_COLUMN", "Name")
-    glide_company_desc_column = _get_env("GLIDE_COMPANY_DESC_COLUMN", "Short client description")
-    glide_base_url = _get_env("GLIDE_BASE_URL", "https://api.glideapp.io").rstrip("/")
+    # Glide (env OR single JSON)
+    glide_json = _parse_json_env(_get_env("GLIDE_CONFIG_JSON", ""))
 
-    # Phase 2: KB tables
-    glide_project_table = _get_env("GLIDE_PROJECT_TABLE", "")
-    glide_raw_material_table = _get_env("GLIDE_RAW_MATERIAL_TABLE", "")
-    glide_processes_table = _get_env("GLIDE_PROCESSES_TABLE", "")
-    glide_boughtouts_table = _get_env("GLIDE_BOUGHTOUTS_TABLE", "")
+    ov = _apply_glide_json_overrides(base=glide_json, fallback_env_get=_get_env)
 
-    # Optional column overrides (safe defaults)
+    glide_api_key = ov["glide_api_key"]
+    glide_app_id = ov["glide_app_id"]
+    glide_base_url = ov["glide_base_url"]
+
+    glide_company_table = ov["glide_company_table"]
+    glide_company_rowid_column = ov["glide_company_rowid_column"]
+    glide_company_name_column = ov["glide_company_name_column"]
+    glide_company_desc_column = ov["glide_company_desc_column"]
+
+    glide_project_table = ov["glide_project_table"]
+    glide_raw_material_table = ov["glide_raw_material_table"]
+    glide_processes_table = ov["glide_processes_table"]
+    glide_boughtouts_table = ov["glide_boughtouts_table"]
+
     glide_project_tenant_column = _get_env("GLIDE_PROJECT_TENANT_COLUMN", "Company Row ID")
     glide_project_rowid_column = _get_env("GLIDE_PROJECT_ROWID_COLUMN", "row ID")
     glide_project_name_column = _get_env("GLIDE_PROJECT_NAME_COLUMN", "Project")
@@ -219,30 +327,29 @@ def load_settings() -> Settings:
     glide_project_legacy_id_column = _get_env("GLIDE_PROJECT_LEGACY_ID_COLUMN", "Legacy ID")
     glide_project_title_column = _get_env("GLIDE_PROJECT_TITLE_COLUMN", "Project")
 
-    glide_raw_material_tenant_column = _get_env("GLIDE_RAW_MATERIAL_TENANT_COLUMN", "Company Row ID")
-    glide_raw_material_rowid_column = _get_env("GLIDE_RAW_MATERIAL_ROWID_COLUMN", "row ID")
-    glide_raw_material_project_name_column = _get_env("GLIDE_RAW_MATERIAL_PROJECT_NAME_COLUMN", "Project")
-    glide_raw_material_part_number_column = _get_env("GLIDE_RAW_MATERIAL_PART_NUMBER_COLUMN", "Part Number")
-    glide_raw_material_legacy_id_column = _get_env("GLIDE_RAW_MATERIAL_LEGACY_ID_COLUMN", "Legacy ID")
-    glide_raw_material_project_row_id_column = _get_env("GLIDE_RAW_MATERIAL_PROJECT_ROW_ID_COLUMN", "Project Row ID")
-    glide_raw_material_title_column = _get_env("GLIDE_RAW_MATERIAL_TITLE_COLUMN", "Name")
+    glide_raw_material_tenant_column = ov["glide_raw_material_tenant_column"]
+    glide_raw_material_rowid_column = ov["glide_raw_material_rowid_column"]
+    glide_raw_material_project_name_column = ov["glide_raw_material_project_name_column"]
+    glide_raw_material_part_number_column = ov["glide_raw_material_part_number_column"]
+    glide_raw_material_legacy_id_column = ov["glide_raw_material_legacy_id_column"]
+    glide_raw_material_project_row_id_column = ov["glide_raw_material_project_row_id_column"]
+    glide_raw_material_title_column = ov["glide_raw_material_title_column"]
 
-    glide_processes_tenant_column = _get_env("GLIDE_PROCESSES_TENANT_COLUMN", "Company Row ID")
-    glide_processes_rowid_column = _get_env("GLIDE_PROCESSES_ROWID_COLUMN", "row ID")
-    glide_processes_project_name_column = _get_env("GLIDE_PROCESSES_PROJECT_NAME_COLUMN", "Project")
-    glide_processes_part_number_column = _get_env("GLIDE_PROCESSES_PART_NUMBER_COLUMN", "Part Number")
-    glide_processes_legacy_id_column = _get_env("GLIDE_PROCESSES_LEGACY_ID_COLUMN", "Legacy ID")
-    glide_processes_project_row_id_column = _get_env("GLIDE_PROCESSES_PROJECT_ROW_ID_COLUMN", "Project Row ID")
-    glide_processes_title_column = _get_env("GLIDE_PROCESSES_TITLE_COLUMN", "Process Name")
+    glide_processes_tenant_column = ov["glide_processes_tenant_column"]
+    glide_processes_rowid_column = ov["glide_processes_rowid_column"]
+    glide_processes_project_name_column = ov["glide_processes_project_name_column"]
+    glide_processes_part_number_column = ov["glide_processes_part_number_column"]
+    glide_processes_legacy_id_column = ov["glide_processes_legacy_id_column"]
+    glide_processes_project_row_id_column = ov["glide_processes_project_row_id_column"]
+    glide_processes_title_column = ov["glide_processes_title_column"]
 
-    glide_boughtouts_tenant_column = _get_env("GLIDE_BOUGHTOUTS_TENANT_COLUMN", "Company Row ID")
-    glide_boughtouts_rowid_column = _get_env("GLIDE_BOUGHTOUTS_ROWID_COLUMN", "row ID")
-    glide_boughtouts_project_name_column = _get_env("GLIDE_BOUGHTOUTS_PROJECT_NAME_COLUMN", "Project")
-    glide_boughtouts_part_number_column = _get_env("GLIDE_BOUGHTOUTS_PART_NUMBER_COLUMN", "Part Number")
-    glide_boughtouts_legacy_id_column = _get_env("GLIDE_BOUGHTOUTS_LEGACY_ID_COLUMN", "Legacy ID")
-    glide_boughtouts_project_row_id_column = _get_env("GLIDE_BOUGHTOUTS_PROJECT_ROW_ID_COLUMN", "Project Row ID")
-    glide_boughtouts_title_column = _get_env("GLIDE_BOUGHTOUTS_TITLE_COLUMN", "Name")
-
+    glide_boughtouts_tenant_column = ov["glide_boughtouts_tenant_column"]
+    glide_boughtouts_rowid_column = ov["glide_boughtouts_rowid_column"]
+    glide_boughtouts_project_name_column = ov["glide_boughtouts_project_name_column"]
+    glide_boughtouts_part_number_column = ov["glide_boughtouts_part_number_column"]
+    glide_boughtouts_legacy_id_column = ov["glide_boughtouts_legacy_id_column"]
+    glide_boughtouts_project_row_id_column = ov["glide_boughtouts_project_row_id_column"]
+    glide_boughtouts_title_column = ov["glide_boughtouts_title_column"]
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
