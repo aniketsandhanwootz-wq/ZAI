@@ -200,7 +200,7 @@ def load_settings() -> Settings:
     glide_api_key = _get_env("GLIDE_API_KEY", "")
     glide_app_id = _get_env("GLIDE_APP_ID", "")
     glide_company_table = _get_env("GLIDE_COMPANY_TABLE", "")
-    glide_company_rowid_column = _get_env("GLIDE_COMPANY_ROWID_COLUMN", "Row ID")
+    glide_company_rowid_column = _get_env("GLIDE_COMPANY_ROWID_COLUMN", "$rowID")
     glide_company_name_column = _get_env("GLIDE_COMPANY_NAME_COLUMN", "Name")
     glide_company_desc_column = _get_env("GLIDE_COMPANY_DESC_COLUMN", "Short client description")
     glide_base_url = _get_env("GLIDE_BASE_URL", "https://api.glideapp.io").rstrip("/")
@@ -213,14 +213,14 @@ def load_settings() -> Settings:
 
     # Optional column overrides (safe defaults)
     glide_project_tenant_column = _get_env("GLIDE_PROJECT_TENANT_COLUMN", "Company Row ID")
-    glide_project_rowid_column = _get_env("GLIDE_PROJECT_ROWID_COLUMN", "Row ID")
+    glide_project_rowid_column = _get_env("GLIDE_PROJECT_ROWID_COLUMN", "row ID")
     glide_project_name_column = _get_env("GLIDE_PROJECT_NAME_COLUMN", "Project")
     glide_project_part_number_column = _get_env("GLIDE_PROJECT_PART_NUMBER_COLUMN", "Part Number")
     glide_project_legacy_id_column = _get_env("GLIDE_PROJECT_LEGACY_ID_COLUMN", "Legacy ID")
     glide_project_title_column = _get_env("GLIDE_PROJECT_TITLE_COLUMN", "Project")
 
     glide_raw_material_tenant_column = _get_env("GLIDE_RAW_MATERIAL_TENANT_COLUMN", "Company Row ID")
-    glide_raw_material_rowid_column = _get_env("GLIDE_RAW_MATERIAL_ROWID_COLUMN", "Row ID")
+    glide_raw_material_rowid_column = _get_env("GLIDE_RAW_MATERIAL_ROWID_COLUMN", "row ID")
     glide_raw_material_project_name_column = _get_env("GLIDE_RAW_MATERIAL_PROJECT_NAME_COLUMN", "Project")
     glide_raw_material_part_number_column = _get_env("GLIDE_RAW_MATERIAL_PART_NUMBER_COLUMN", "Part Number")
     glide_raw_material_legacy_id_column = _get_env("GLIDE_RAW_MATERIAL_LEGACY_ID_COLUMN", "Legacy ID")
@@ -228,7 +228,7 @@ def load_settings() -> Settings:
     glide_raw_material_title_column = _get_env("GLIDE_RAW_MATERIAL_TITLE_COLUMN", "Name")
 
     glide_processes_tenant_column = _get_env("GLIDE_PROCESSES_TENANT_COLUMN", "Company Row ID")
-    glide_processes_rowid_column = _get_env("GLIDE_PROCESSES_ROWID_COLUMN", "Row ID")
+    glide_processes_rowid_column = _get_env("GLIDE_PROCESSES_ROWID_COLUMN", "row ID")
     glide_processes_project_name_column = _get_env("GLIDE_PROCESSES_PROJECT_NAME_COLUMN", "Project")
     glide_processes_part_number_column = _get_env("GLIDE_PROCESSES_PART_NUMBER_COLUMN", "Part Number")
     glide_processes_legacy_id_column = _get_env("GLIDE_PROCESSES_LEGACY_ID_COLUMN", "Legacy ID")
@@ -236,7 +236,7 @@ def load_settings() -> Settings:
     glide_processes_title_column = _get_env("GLIDE_PROCESSES_TITLE_COLUMN", "Process Name")
 
     glide_boughtouts_tenant_column = _get_env("GLIDE_BOUGHTOUTS_TENANT_COLUMN", "Company Row ID")
-    glide_boughtouts_rowid_column = _get_env("GLIDE_BOUGHTOUTS_ROWID_COLUMN", "Row ID")
+    glide_boughtouts_rowid_column = _get_env("GLIDE_BOUGHTOUTS_ROWID_COLUMN", "row ID")
     glide_boughtouts_project_name_column = _get_env("GLIDE_BOUGHTOUTS_PROJECT_NAME_COLUMN", "Project")
     glide_boughtouts_part_number_column = _get_env("GLIDE_BOUGHTOUTS_PART_NUMBER_COLUMN", "Part Number")
     glide_boughtouts_legacy_id_column = _get_env("GLIDE_BOUGHTOUTS_LEGACY_ID_COLUMN", "Legacy ID")

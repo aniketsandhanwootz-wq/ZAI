@@ -1,3 +1,12 @@
+# Useless file, please don't refer to it
+# This file was earlier created consideing Project tab ingestion from Glide but the project tab is actually from Google Sheets
+# So this file is redundant and not used anywhere in the codebase
+# Refering to this file may cause confusion and bugs
+# Hence, please avoid using this file
+# If you need to refer to Project tab ingestion, please refer to glide_ingest_base.py instead
+# If you need to refer to any other tab ingestion from Glide, please refer to respective files like glide_ingest_raw_material.py, glide_ingest_processes.py, glide_ingest_boughtouts.py etc.
+# Thank you for understanding!
+# If you have any questions, please reach out to Aniket Sandhan for clarification.
 from __future__ import annotations
 
 from ...config import Settings

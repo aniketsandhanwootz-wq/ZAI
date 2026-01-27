@@ -11,7 +11,7 @@ def boughtouts_spec(settings: Settings) -> GlideIngestSpec:
         table_name=getattr(settings, "glide_boughtouts_table", "") or "",
 
         tenant_id_column=getattr(settings, "glide_boughtouts_tenant_column", "") or "Company Row ID",
-        rowid_column=getattr(settings, "glide_boughtouts_rowid_column", "") or "Row ID",
+        rowid_column=getattr(settings, "glide_boughtouts_rowid_column", "") or "$rowID",
 
         project_name_column=getattr(settings, "glide_boughtouts_project_name_column", "") or "Project",
         part_number_column=getattr(settings, "glide_boughtouts_part_number_column", "") or "Part Number",

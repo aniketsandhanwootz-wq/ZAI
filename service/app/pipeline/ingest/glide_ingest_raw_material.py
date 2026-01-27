@@ -6,22 +6,29 @@ from .glide_ingest_project import project_spec
 
 
 def raw_material_spec(settings: Settings) -> GlideIngestSpec:
+    project_col = getattr(settings, "glide_raw_material_project_name_column", "") or getattr(settings, "glide_raw_material_project_column", "") or "Project number"
+    part_col = getattr(settings, "glide_raw_material_part_number_column", "") or "Part number"
+    title_col = getattr(settings, "glide_raw_material_title_column", "") or "Part name"
+
     return GlideIngestSpec(
         entity="raw_material",
         table_name=getattr(settings, "glide_raw_material_table", "") or "",
 
+        # tenant is derived if missing
         tenant_id_column=getattr(settings, "glide_raw_material_tenant_column", "") or "Company Row ID",
-        rowid_column=getattr(settings, "glide_raw_material_rowid_column", "") or "Row ID",
 
-        project_name_column=getattr(settings, "glide_raw_material_project_name_column", "") or "Project",
-        part_number_column=getattr(settings, "glide_raw_material_part_number_column", "") or "Part Number",
+        # IMPORTANT: Glide default is $rowID
+        rowid_column=getattr(settings, "glide_raw_material_rowid_column", "") or "$rowID",
+
+        project_name_column=project_col,
+        part_number_column=part_col,
         legacy_id_column=getattr(settings, "glide_raw_material_legacy_id_column", "") or "Legacy ID",
         project_row_id_column=getattr(settings, "glide_raw_material_project_row_id_column", "") or "Project Row ID",
 
-        title_column=getattr(settings, "glide_raw_material_title_column", "") or "Name",
+        title_column=title_col,
 
         drop_keys=["Updated At", "Last Updated"],
-        rag_include_keys=None,  # you can tighten later
+        rag_include_keys=None,
     )
 
 

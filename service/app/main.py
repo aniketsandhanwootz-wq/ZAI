@@ -101,7 +101,11 @@ def admin_trigger(request: Request, payload: WebhookPayload):
     result = run_event_graph(settings, payload.model_dump(exclude_none=True))
     return {"ok": True, "result": result}
 
-
+@app.post("/admin/migrate")
+def admin_migrate(request: Request):
+    settings = _get_settings(request)
+    run_migrations(settings)
+    return {"ok": True}
 @app.post("/admin/ingest")
 def admin_ingest(
     request: Request,
@@ -264,14 +268,55 @@ def admin_ingest(
             "error_samples": err_samples,
             "note": "Media backfill runs CHECKIN_UPDATED with meta.tenant_id + ingest_only/media_only for stable tenant resolution.",
         }
-    if source == "projects":
-        results["projects"] = {"note": "No separate projects table in MVP; we look up Project row on-demand."}
+    if source in ("projects", "all"):
+        from .tools.sheets_tool import SheetsTool, _key as skey, _norm_value as snorm
+
+        sheets = SheetsTool(settings)
+        projects = sheets.list_projects() or []
+
+        # mapped keys
+        k_legacy = skey(sheets.map.col("project", "legacy_id"))
+        k_tenant = skey(sheets.map.col("project", "company_row_id"))
+        k_name = skey(sheets.map.col("project", "project_name"))
+        k_part = skey(sheets.map.col("project", "part_number"))
+
+        missing_legacy = 0
+        missing_tenant = 0
+        bad_samples = []
+
+        for pr in projects[:5000]:
+            lid = snorm((pr or {}).get(k_legacy, ""))
+            tid = snorm((pr or {}).get(k_tenant, ""))
+            pn = snorm((pr or {}).get(k_name, ""))
+            part = snorm((pr or {}).get(k_part, ""))
+
+            if not lid:
+                missing_legacy += 1
+            if not tid:
+                missing_tenant += 1
+
+            if (not lid or not tid) and len(bad_samples) < 20:
+                bad_samples.append(
+                    {"legacy_id": lid, "tenant_id": tid, "project_name": pn, "part_number": part}
+                )
+
+        results["projects"] = {
+            "ok": True,
+            "rows_seen": len(projects),
+            "missing_legacy_id": missing_legacy,
+            "missing_tenant_id": missing_tenant,
+            "bad_samples": bad_samples,
+            "note": "Validated Project tab (Sheets) as source of truth for legacy_id + tenant_id.",
+        }
 
     # -----------------------
     # Glide backfill (Phase 2)
     # -----------------------
     if source in ("glide_project", "glide_all", "all"):
-        results["glide_project"] = ingest_glide_project(settings, limit=max(0, int(limit)))
+        if (settings.glide_project_table or "").strip():
+            results["glide_project"] = ingest_glide_project(settings, limit=max(0, int(limit)))
+        else:
+            results["glide_project"] = {"ok": True, "note": "Skipped: GLIDE_PROJECT_TABLE not set (Projects come from Sheets in this setup)."}
 
     if source in ("glide_raw_material", "glide_all", "all"):
         results["glide_raw_material"] = ingest_glide_raw_material(settings, limit=max(0, int(limit)))
