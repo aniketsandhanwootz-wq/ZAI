@@ -83,14 +83,22 @@ class SheetsTool:
         # tab_key -> {"tab_name","headers","keys","idx","rows"}
         self._cache: Dict[str, Dict[str, Any]] = {}
 
+        # ---- Project index cache (project_name + part_number -> legacy_id) ----
+        self._project_index: Optional[Dict[Tuple[str, str], str]] = None
+        self._project_index_built_at: float = 0.0
     # ---------- Cache helpers ----------
 
     def refresh_cache(self, tab_key: Optional[str] = None) -> None:
         """Clear cached sheet data (useful if you edit sheet while server runs)."""
         if tab_key is None:
             self._cache.clear()
+            self._project_index = None
+            self._project_index_built_at = 0.0
         else:
             self._cache.pop(tab_key, None)
+            if tab_key == "project":
+                self._project_index = None
+                self._project_index_built_at = 0.0
 
     # ---------- Low-level helpers ----------
 
@@ -250,6 +258,105 @@ class SheetsTool:
         for r in t["rows"]:
             if iid < len(r) and _key(r[iid]) == want:
                 return self._row_to_dict(t, r)
+        return None
+    
+    # ---------- Project index + legacy_id resolution (Phase 0 contract) ----------
+
+    def _build_project_index(self) -> Dict[Tuple[str, str], str]:
+        """
+        Builds a fast lookup:
+          (project_name, part_number) -> legacy_id
+        Uses normalized keys via _key().
+        """
+        t = self._table("project")
+        if not t["headers"]:
+            return {}
+
+        col_project = self.map.col("project", "project_name")
+        col_part = self.map.col("project", "part_number")
+        col_id = self.map.col("project", "legacy_id")
+
+        ip = self._idx(t, col_project, "project")
+        inum = self._idx(t, col_part, "project")
+        iid = self._idx(t, col_id, "project")
+
+        idx_map: Dict[Tuple[str, str], str] = {}
+        for r in t["rows"]:
+            p = _key(r[ip]) if ip < len(r) else ""
+            n = _key(r[inum]) if inum < len(r) else ""
+            lid = _norm_value(r[iid]) if iid < len(r) else ""
+            if p and n and lid:
+                idx_map[(p, n)] = lid
+        return idx_map
+
+    def get_legacy_id_by_project_part(self, project_name: str, part_number: str) -> Optional[str]:
+        """
+        Phase 0 Rule #2:
+          Resolve legacy_id using Sheets Project index: (project_name, part_number) -> legacy_id
+        """
+        p = _key(project_name)
+        n = _key(part_number)
+        if not p or not n:
+            return None
+
+        # Build lazily and reuse
+        if self._project_index is None:
+            self._project_index = self._build_project_index()
+            self._project_index_built_at = time.time()
+
+        return self._project_index.get((p, n))
+
+    @staticmethod
+    def normalize_legacy_id(x: object) -> str:
+        """
+        Phase 0 Rule #1 normalization:
+        - strip/whitespace collapse
+        - convert 123.0 -> 123
+        """
+        return _norm_value(x)
+
+    def resolve_legacy_id_for_glide_row(
+        self,
+        row: Dict[str, Any],
+        *,
+        legacy_id_keys: Tuple[str, ...] = ("legacy_id", "project_id", "project id", "id", "legacy id"),
+        project_name_keys: Tuple[str, ...] = ("project_name", "project name", "project number", "Project number", "Project name"),
+        part_number_keys: Tuple[str, ...] = ("part_number", "part number", "Part number", "Overall Part number"),
+    ) -> Optional[str]:
+        """
+        Implements Phase 0 contract for *any* Glide row.
+
+        Rule #1: if row already carries legacy_id/project_id -> use it (normalized)
+        Rule #2: else resolve via Sheets Project index using (project_name, part_number)
+        Rule #3: else return None (store tenant-scoped only)
+        """
+        # Rule #1: direct legacy_id
+        for k in legacy_id_keys:
+            if k in row:
+                v = self.normalize_legacy_id(row.get(k))
+                if v:
+                    return v
+
+        # Rule #2: fallback (project_name + part_number)
+        project_name = None
+        part_number = None
+
+        for k in project_name_keys:
+            if k in row and _norm_value(row.get(k)):
+                project_name = str(row.get(k))
+                break
+
+        for k in part_number_keys:
+            if k in row and _norm_value(row.get(k)):
+                part_number = str(row.get(k))
+                break
+
+        if project_name and part_number:
+            lid = self.get_legacy_id_by_project_part(project_name, part_number)
+            if lid:
+                return lid
+
+        # Rule #3
         return None
     # ---------- Domain readers ----------
 

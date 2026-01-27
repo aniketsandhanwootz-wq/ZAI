@@ -53,12 +53,11 @@ Update behavior (IMPORTANT):
 - Add new chips only if context introduces new risks/requirements.
 
 Output Format (Strict):
-- Output EXACTLY 3 or 4 lines.
+- Output EXACTLY 4 or 5 lines.
 - Each line MUST be 6-8 words max.
 - Each line must be actionable & specific.
 - Each line must imply a quick visual check or measurement.
 - No headings, no extra text.
-
 
 INPUTS:
 INFERRED_STAGE:

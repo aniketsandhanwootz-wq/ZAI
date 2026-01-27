@@ -65,6 +65,105 @@ class VectorTool:
     # Existence checks (incremental)
     # ---------------------------
 
+    def glide_kb_vector_hash_exists(self, *, tenant_id: str, item_id: str, content_hash: str) -> bool:
+        sql = """
+        SELECT 1
+        FROM glide_kb_vectors
+        WHERE tenant_id=%s AND item_id=%s AND content_hash=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, item_id, content_hash))
+            return cur.fetchone() is not None
+
+
+    def upsert_glide_kb_item(
+        self,
+        *,
+        tenant_id: str,
+        item_id: str,
+        table_name: str,
+        row_id: str,
+        row_hash: str,
+        project_name: str = "",
+        part_number: str = "",
+        legacy_id: str = "",
+        title: str = "",
+        rag_text: str = "",
+        raw_json: Dict[str, Any] | None = None,
+    ) -> None:
+        sql = """
+        INSERT INTO glide_kb_items (
+        tenant_id, item_id, table_name, row_id,
+        row_hash,
+        project_name, part_number, legacy_id,
+        title, rag_text, raw_json,
+        updated_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb, now())
+        ON CONFLICT (tenant_id, item_id)
+        DO UPDATE SET
+        table_name=EXCLUDED.table_name,
+        row_id=EXCLUDED.row_id,
+        row_hash=EXCLUDED.row_hash,
+        project_name=EXCLUDED.project_name,
+        part_number=EXCLUDED.part_number,
+        legacy_id=EXCLUDED.legacy_id,
+        title=EXCLUDED.title,
+        rag_text=EXCLUDED.rag_text,
+        raw_json=EXCLUDED.raw_json,
+        updated_at=now()
+        """
+        import json as _json
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (
+                    tenant_id,
+                    item_id,
+                    table_name or None,
+                    row_id or None,
+                    row_hash,
+                    project_name or None,
+                    part_number or None,
+                    legacy_id or None,
+                    title or None,
+                    rag_text or "",
+                    _json.dumps(raw_json or {}),
+                ),
+            )
+
+
+    def insert_glide_kb_vector_if_new(
+        self,
+        *,
+        tenant_id: str,
+        item_id: str,
+        chunk_index: int,
+        chunk_text: str,
+        embedding: List[float],
+        content_hash: str,
+    ) -> None:
+        """
+        Idempotent insert: DO NOTHING if the (tenant_id,item_id,content_hash) already exists.
+        """
+        sql = """
+        INSERT INTO glide_kb_vectors (
+        tenant_id, item_id,
+        chunk_index, chunk_text,
+        embedding,
+        content_hash,
+        updated_at
+        )
+        VALUES (%s,%s,%s,%s,%s::vector,%s, now())
+        ON CONFLICT (tenant_id, item_id, content_hash)
+        DO NOTHING
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                sql,
+                (tenant_id, item_id, int(chunk_index), chunk_text or "", _vec_str(embedding), content_hash),
+            )
     def ccp_hash_exists(self, *, tenant_id: str, ccp_id: str, chunk_type: str, content_hash: str) -> bool:
         sql = """
         SELECT 1

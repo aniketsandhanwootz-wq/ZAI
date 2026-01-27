@@ -18,7 +18,10 @@ from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 from .schemas.webhook import WebhookPayload
 from .routers import appsheet_webhook_router, teams_test_router
-
+from .pipeline.ingest.glide_ingest_project import ingest_glide_project
+from .pipeline.ingest.glide_ingest_raw_material import ingest_glide_raw_material
+from .pipeline.ingest.glide_ingest_processes import ingest_glide_processes
+from .pipeline.ingest.glide_ingest_boughtouts import ingest_glide_boughtouts
 # Load .env from service/.env (override shell env so local tests match)
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
@@ -102,7 +105,11 @@ def admin_trigger(request: Request, payload: WebhookPayload):
 @app.post("/admin/ingest")
 def admin_ingest(
     request: Request,
-    source: Literal["projects", "ccp", "history", "dashboard", "media", "all"] = "all",
+    source: Literal[
+        "projects", "ccp", "history", "dashboard", "media",
+        "glide_project", "glide_raw_material", "glide_processes", "glide_boughtouts", "glide_all",
+        "all"
+    ] = "all",
     limit: int = 500,
 ):
     """
@@ -260,4 +267,18 @@ def admin_ingest(
     if source == "projects":
         results["projects"] = {"note": "No separate projects table in MVP; we look up Project row on-demand."}
 
+    # -----------------------
+    # Glide backfill (Phase 2)
+    # -----------------------
+    if source in ("glide_project", "glide_all", "all"):
+        results["glide_project"] = ingest_glide_project(settings, limit=max(0, int(limit)))
+
+    if source in ("glide_raw_material", "glide_all", "all"):
+        results["glide_raw_material"] = ingest_glide_raw_material(settings, limit=max(0, int(limit)))
+
+    if source in ("glide_processes", "glide_all", "all"):
+        results["glide_processes"] = ingest_glide_processes(settings, limit=max(0, int(limit)))
+
+    if source in ("glide_boughtouts", "glide_all", "all"):
+        results["glide_boughtouts"] = ingest_glide_boughtouts(settings, limit=max(0, int(limit)))
     return {"ok": True, "results": results}

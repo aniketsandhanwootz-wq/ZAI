@@ -26,6 +26,7 @@ def run_migrations(settings: Settings) -> None:
         "005_incident_vector_type_index.sql",
         "006_artifacts_lookup_indexes.sql",
         "007_company_profiles.sql",
+        "008_glide_kb.sql",        
     ]
     logger.info("running migrations from %s", mig_dir)
 
@@ -46,6 +47,8 @@ def run_migrations(settings: Settings) -> None:
                 cur.execute("ANALYZE ccp_vectors;")
                 cur.execute("ANALYZE dashboard_vectors;")
                 cur.execute("ANALYZE company_vectors;")
+                cur.execute("ANALYZE glide_kb_items;")
+                cur.execute("ANALYZE glide_kb_vectors;")                
             conn.commit()
     except Exception:
         # don't fail boot

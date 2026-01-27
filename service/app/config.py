@@ -115,7 +115,43 @@ class Settings:
     glide_company_name_column: str
     glide_company_desc_column: str
     glide_base_url: str
+    # Phase 2: additional Glide KB tables
+    glide_project_table: str
+    glide_raw_material_table: str
+    glide_processes_table: str
+    glide_boughtouts_table: str
 
+    # Optional: allow overriding key column names per table
+    glide_project_tenant_column: str
+    glide_project_rowid_column: str
+    glide_project_name_column: str
+    glide_project_part_number_column: str
+    glide_project_legacy_id_column: str
+    glide_project_title_column: str
+
+    glide_raw_material_tenant_column: str
+    glide_raw_material_rowid_column: str
+    glide_raw_material_project_name_column: str
+    glide_raw_material_part_number_column: str
+    glide_raw_material_legacy_id_column: str
+    glide_raw_material_project_row_id_column: str
+    glide_raw_material_title_column: str
+
+    glide_processes_tenant_column: str
+    glide_processes_rowid_column: str
+    glide_processes_project_name_column: str
+    glide_processes_part_number_column: str
+    glide_processes_legacy_id_column: str
+    glide_processes_project_row_id_column: str
+    glide_processes_title_column: str
+
+    glide_boughtouts_tenant_column: str
+    glide_boughtouts_rowid_column: str
+    glide_boughtouts_project_name_column: str
+    glide_boughtouts_part_number_column: str
+    glide_boughtouts_legacy_id_column: str
+    glide_boughtouts_project_row_id_column: str
+    glide_boughtouts_title_column: str
 
 def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
@@ -169,6 +205,44 @@ def load_settings() -> Settings:
     glide_company_desc_column = _get_env("GLIDE_COMPANY_DESC_COLUMN", "Short client description")
     glide_base_url = _get_env("GLIDE_BASE_URL", "https://api.glideapp.io").rstrip("/")
 
+    # Phase 2: KB tables
+    glide_project_table = _get_env("GLIDE_PROJECT_TABLE", "")
+    glide_raw_material_table = _get_env("GLIDE_RAW_MATERIAL_TABLE", "")
+    glide_processes_table = _get_env("GLIDE_PROCESSES_TABLE", "")
+    glide_boughtouts_table = _get_env("GLIDE_BOUGHTOUTS_TABLE", "")
+
+    # Optional column overrides (safe defaults)
+    glide_project_tenant_column = _get_env("GLIDE_PROJECT_TENANT_COLUMN", "Company Row ID")
+    glide_project_rowid_column = _get_env("GLIDE_PROJECT_ROWID_COLUMN", "Row ID")
+    glide_project_name_column = _get_env("GLIDE_PROJECT_NAME_COLUMN", "Project")
+    glide_project_part_number_column = _get_env("GLIDE_PROJECT_PART_NUMBER_COLUMN", "Part Number")
+    glide_project_legacy_id_column = _get_env("GLIDE_PROJECT_LEGACY_ID_COLUMN", "Legacy ID")
+    glide_project_title_column = _get_env("GLIDE_PROJECT_TITLE_COLUMN", "Project")
+
+    glide_raw_material_tenant_column = _get_env("GLIDE_RAW_MATERIAL_TENANT_COLUMN", "Company Row ID")
+    glide_raw_material_rowid_column = _get_env("GLIDE_RAW_MATERIAL_ROWID_COLUMN", "Row ID")
+    glide_raw_material_project_name_column = _get_env("GLIDE_RAW_MATERIAL_PROJECT_NAME_COLUMN", "Project")
+    glide_raw_material_part_number_column = _get_env("GLIDE_RAW_MATERIAL_PART_NUMBER_COLUMN", "Part Number")
+    glide_raw_material_legacy_id_column = _get_env("GLIDE_RAW_MATERIAL_LEGACY_ID_COLUMN", "Legacy ID")
+    glide_raw_material_project_row_id_column = _get_env("GLIDE_RAW_MATERIAL_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    glide_raw_material_title_column = _get_env("GLIDE_RAW_MATERIAL_TITLE_COLUMN", "Name")
+
+    glide_processes_tenant_column = _get_env("GLIDE_PROCESSES_TENANT_COLUMN", "Company Row ID")
+    glide_processes_rowid_column = _get_env("GLIDE_PROCESSES_ROWID_COLUMN", "Row ID")
+    glide_processes_project_name_column = _get_env("GLIDE_PROCESSES_PROJECT_NAME_COLUMN", "Project")
+    glide_processes_part_number_column = _get_env("GLIDE_PROCESSES_PART_NUMBER_COLUMN", "Part Number")
+    glide_processes_legacy_id_column = _get_env("GLIDE_PROCESSES_LEGACY_ID_COLUMN", "Legacy ID")
+    glide_processes_project_row_id_column = _get_env("GLIDE_PROCESSES_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    glide_processes_title_column = _get_env("GLIDE_PROCESSES_TITLE_COLUMN", "Process Name")
+
+    glide_boughtouts_tenant_column = _get_env("GLIDE_BOUGHTOUTS_TENANT_COLUMN", "Company Row ID")
+    glide_boughtouts_rowid_column = _get_env("GLIDE_BOUGHTOUTS_ROWID_COLUMN", "Row ID")
+    glide_boughtouts_project_name_column = _get_env("GLIDE_BOUGHTOUTS_PROJECT_NAME_COLUMN", "Project")
+    glide_boughtouts_part_number_column = _get_env("GLIDE_BOUGHTOUTS_PART_NUMBER_COLUMN", "Part Number")
+    glide_boughtouts_legacy_id_column = _get_env("GLIDE_BOUGHTOUTS_LEGACY_ID_COLUMN", "Legacy ID")
+    glide_boughtouts_project_row_id_column = _get_env("GLIDE_BOUGHTOUTS_PROJECT_ROW_ID_COLUMN", "Project Row ID")
+    glide_boughtouts_title_column = _get_env("GLIDE_BOUGHTOUTS_TITLE_COLUMN", "Name")
+
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
@@ -202,6 +276,41 @@ def load_settings() -> Settings:
         glide_company_name_column=glide_company_name_column,
         glide_company_desc_column=glide_company_desc_column,
         glide_base_url=glide_base_url,
+        glide_project_table=glide_project_table,
+        glide_raw_material_table=glide_raw_material_table,
+        glide_processes_table=glide_processes_table,
+        glide_boughtouts_table=glide_boughtouts_table,
+
+        glide_project_tenant_column=glide_project_tenant_column,
+        glide_project_rowid_column=glide_project_rowid_column,
+        glide_project_name_column=glide_project_name_column,
+        glide_project_part_number_column=glide_project_part_number_column,
+        glide_project_legacy_id_column=glide_project_legacy_id_column,
+        glide_project_title_column=glide_project_title_column,
+
+        glide_raw_material_tenant_column=glide_raw_material_tenant_column,
+        glide_raw_material_rowid_column=glide_raw_material_rowid_column,
+        glide_raw_material_project_name_column=glide_raw_material_project_name_column,
+        glide_raw_material_part_number_column=glide_raw_material_part_number_column,
+        glide_raw_material_legacy_id_column=glide_raw_material_legacy_id_column,
+        glide_raw_material_project_row_id_column=glide_raw_material_project_row_id_column,
+        glide_raw_material_title_column=glide_raw_material_title_column,
+
+        glide_processes_tenant_column=glide_processes_tenant_column,
+        glide_processes_rowid_column=glide_processes_rowid_column,
+        glide_processes_project_name_column=glide_processes_project_name_column,
+        glide_processes_part_number_column=glide_processes_part_number_column,
+        glide_processes_legacy_id_column=glide_processes_legacy_id_column,
+        glide_processes_project_row_id_column=glide_processes_project_row_id_column,
+        glide_processes_title_column=glide_processes_title_column,
+
+        glide_boughtouts_tenant_column=glide_boughtouts_tenant_column,
+        glide_boughtouts_rowid_column=glide_boughtouts_rowid_column,
+        glide_boughtouts_project_name_column=glide_boughtouts_project_name_column,
+        glide_boughtouts_part_number_column=glide_boughtouts_part_number_column,
+        glide_boughtouts_legacy_id_column=glide_boughtouts_legacy_id_column,
+        glide_boughtouts_project_row_id_column=glide_boughtouts_project_row_id_column,
+        glide_boughtouts_title_column=glide_boughtouts_title_column,
     )
 
 
