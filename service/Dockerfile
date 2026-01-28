@@ -24,10 +24,6 @@ RUN ln -s /app/packages /packages
 EXPOSE 8000
 
 # Run API + RQ worker in same container (two processes)
-CMD ["sh", "-c", "\
-  QUEUES=$(echo \"${CONSUMER_QUEUES:-default}\" | tr ',' ' '); \
-  echo \"Starting RQ worker on queues: $QUEUES\"; \
-  rq worker $QUEUES --url \"$REDIS_URL\" & \
-  exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} \
-"]
+# Run ONLY the API. Worker is spawned by app.consumer.py when RUN_CONSUMER=1
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
