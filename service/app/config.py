@@ -78,55 +78,95 @@ def _deep_get(d: dict, path: list[str], default: str = "") -> str:
 
 def _apply_glide_json_overrides(*, base: dict, fallback_env_get) -> dict:
     """
-    base: parsed GLIDE_CONFIG_JSON dict
-    fallback_env_get: function(name, default)->str (use _get_env)
-    Returns a dict of overrides for Settings fields (strings).
-    JSON schema (recommended):
+    Supports both JSON schemas:
+
+    A) Old:
       {
         "api_key": "...",
         "app_id": "...",
-        "base_url": "https://api.glideapp.io",
-        "company": {
-          "table": "...",
-          "columns": { "rowid": "$rowID", "name": "Name", "desc": "nszR1" }
-        },
+        "base_url": "...",
+        "company": { "table": "...", "columns": { "rowid": "$rowID", "name": "Name", "desc": "nszR1" } },
+        "tables": { ... }
+      }
+
+    B) New (your current):
+      {
+        "api_key": "...",
+        "app_id": "...",
+        "base_url": "...",
         "tables": {
-          "raw_material": {
-            "table": "...",
-            "columns": {
-              "tenant": "Project number",
-              "rowid": "$rowID",
-              "project": "Project number",
-              "part_number": "Part number",
-              "legacy_id": "Legacy ID",
-              "project_row_id": "Project Row ID",
-              "title": "Part name"
-            }
-          },
-          "processes": { ... },
-          "boughtouts": { ... }
+          "company": { "table": "...", "columns": { "row_id": "$rowID", "name": "Name", "description": "nszR1" } },
+          "raw_material": { ... },
+          ...
         }
       }
     """
     overrides: dict = {}
+
+    def _deep_get_any(d: dict, paths: list[list[str]], default: str = "") -> str:
+        for p in paths:
+            v = _deep_get(d, p, default="")
+            if str(v or "").strip():
+                return str(v).strip()
+        return default
 
     # top-level
     overrides["glide_api_key"] = _deep_get(base, ["api_key"], fallback_env_get("GLIDE_API_KEY", ""))
     overrides["glide_app_id"] = _deep_get(base, ["app_id"], fallback_env_get("GLIDE_APP_ID", ""))
     overrides["glide_base_url"] = _deep_get(base, ["base_url"], fallback_env_get("GLIDE_BASE_URL", "https://api.glideapp.io")).rstrip("/")
 
-    # company
-    overrides["glide_company_table"] = _deep_get(base, ["company", "table"], fallback_env_get("GLIDE_COMPANY_TABLE", ""))
-    overrides["glide_company_rowid_column"] = _deep_get(base, ["company", "columns", "rowid"], fallback_env_get("GLIDE_COMPANY_ROWID_COLUMN", "$rowID"))
-    overrides["glide_company_name_column"] = _deep_get(base, ["company", "columns", "name"], fallback_env_get("GLIDE_COMPANY_NAME_COLUMN", "Name"))
-    overrides["glide_company_desc_column"] = _deep_get(base, ["company", "columns", "desc"], fallback_env_get("GLIDE_COMPANY_DESC_COLUMN", "Short client description"))
+    # ---- Company: support both locations + key names ----
+    overrides["glide_company_table"] = _deep_get_any(
+        base,
+        [["company", "table"], ["tables", "company", "table"]],
+        fallback_env_get("GLIDE_COMPANY_TABLE", ""),
+    )
+
+    overrides["glide_company_rowid_column"] = _deep_get_any(
+        base,
+        [
+            ["company", "columns", "rowid"],
+            ["company", "columns", "row_id"],
+            ["tables", "company", "columns", "rowid"],
+            ["tables", "company", "columns", "row_id"],
+        ],
+        fallback_env_get("GLIDE_COMPANY_ROWID_COLUMN", "$rowID"),
+    )
+
+    overrides["glide_company_name_column"] = _deep_get_any(
+        base,
+        [
+            ["company", "columns", "name"],
+            ["tables", "company", "columns", "name"],
+        ],
+        fallback_env_get("GLIDE_COMPANY_NAME_COLUMN", "Name"),
+    )
+
+    overrides["glide_company_desc_column"] = _deep_get_any(
+        base,
+        [
+            ["company", "columns", "desc"],
+            ["company", "columns", "description"],
+            ["tables", "company", "columns", "desc"],
+            ["tables", "company", "columns", "description"],
+        ],
+        fallback_env_get("GLIDE_COMPANY_DESC_COLUMN", "Short client description"),
+    )
 
     # tables helper
     def t_table(key: str, env_name: str) -> str:
         return _deep_get(base, ["tables", key, "table"], fallback_env_get(env_name, ""))
 
     def t_col(key: str, json_col: str, env_name: str, default: str) -> str:
-        return _deep_get(base, ["tables", key, "columns", json_col], fallback_env_get(env_name, default))
+        # accept both "rowid" and "row_id" style keys
+        return _deep_get_any(
+            base,
+            [
+                ["tables", key, "columns", json_col],
+                ["tables", key, "columns", json_col.replace("rowid", "row_id")],
+            ],
+            fallback_env_get(env_name, default),
+        )
 
     # raw_material
     overrides["glide_raw_material_table"] = t_table("raw_material", "GLIDE_RAW_MATERIAL_TABLE")

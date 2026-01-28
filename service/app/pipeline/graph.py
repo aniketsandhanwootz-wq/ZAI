@@ -1,3 +1,20 @@
+# service/app/pipeline/graph.py
+# This module defines the data pipeline graph for processing events such as checkin creation,
+# conversation additions, CCP updates, and dashboard updates. It resolves and orchestrates
+# various processing nodes to handle data ingestion, context retrieval, AI reply generation,
+# media analysis, vector upsertion, and writeback to the source system. The graph is
+# designed to be modular and extensible, allowing for easy addition of new processing nodes
+# and workflows as needed.
+# It also includes logic for handling idempotency, event type filtering, and specialized processing
+# for different event types.
+# The main function `run_event_graph` executes the pipeline based on the event type and payload,
+# returning the results and logs of the processing.
+# It leverages a RunLog for tracking execution and supports various modes such as
+# ingest-only and media-only processing.
+# The module is structured to facilitate maintenance and future enhancements.
+# Happy coding!
+
+
 from __future__ import annotations
 
 import importlib

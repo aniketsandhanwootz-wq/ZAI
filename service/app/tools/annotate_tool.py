@@ -1,3 +1,6 @@
+# service/app/tools/annotate_tool.py
+# Tool to draw bounding boxes on images.
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple

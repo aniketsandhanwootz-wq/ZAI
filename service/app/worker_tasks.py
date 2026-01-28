@@ -10,7 +10,7 @@ from .pipeline.ingest.glide_ingest_raw_material import upsert_glide_raw_material
 from .pipeline.ingest.glide_ingest_processes import upsert_glide_process_row
 from .pipeline.ingest.glide_ingest_boughtouts import upsert_glide_boughtouts_row
 from .pipeline.ingest.glide_ingest_project import upsert_glide_project_row  # may be no-op if project table not configured
-
+from .pipeline.ingest.glide_ingest_company import upsert_glide_company_row
 logger = logging.getLogger("zai.worker")
 
 
@@ -40,6 +40,10 @@ def _normalize_table_key(k: str) -> str:
         "bo": "boughtouts",
         "project": "project",
         "projects": "project",
+        "company": "company",
+        "companies": "company",
+        "company_profile": "company",
+        "company_profiles": "company",
     }
     return alias.get(k, k)
 
@@ -87,8 +91,10 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
                 elif table_key == "project":
                     # if GLIDE_PROJECT_TABLE not configured, your code already "skips" in full scan.
                     out = upsert_glide_project_row(settings, row_id=rid)
+                elif table_key == "company":
+                    out = upsert_glide_company_row(settings, row_id=rid)
                 else:
-                    raise RuntimeError(f"Unknown table_key='{table_key}' (expected raw_material/processes/boughtouts/project)")
+                    raise RuntimeError(f"Unknown table_key='{table_key}' (expected raw_material/processes/boughtouts/project/company)")
 
                 # best-effort: infer tenant_id from result if present
                 # (your ingest_rows returns ok + counts; not tenant. that's fine)

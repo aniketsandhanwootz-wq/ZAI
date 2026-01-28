@@ -1,3 +1,11 @@
+# service/app/main.py
+# This is the main FastAPI application for the Wootz Checkin AI service.
+# It sets up routes, middleware, and startup/shutdown events.
+# It also includes admin endpoints for triggering events and performing data ingestion.
+# It integrates various ingestion pipelines including CCP, history, dashboard, and Glide data sources.
+# The application uses environment variables and a settings configuration for customization.
+# It also starts a background consumer thread for processing jobs.
+# Happy coding!
 from __future__ import annotations
 
 import uuid
@@ -22,6 +30,7 @@ from .pipeline.ingest.glide_ingest_project import ingest_glide_project
 from .pipeline.ingest.glide_ingest_raw_material import ingest_glide_raw_material
 from .pipeline.ingest.glide_ingest_processes import ingest_glide_processes
 from .pipeline.ingest.glide_ingest_boughtouts import ingest_glide_boughtouts
+from .pipeline.ingest.glide_ingest_company import ingest_glide_company
 # Load .env from service/.env (override shell env so local tests match)
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=True)
 
@@ -112,6 +121,7 @@ def admin_ingest(
     request: Request,
     source: Literal[
         "projects", "ccp", "history", "dashboard", "media",
+        "glide_company",
         "glide_project", "glide_raw_material", "glide_processes", "glide_boughtouts", "glide_all",
         "all"
     ] = "all",
@@ -123,10 +133,13 @@ def admin_ingest(
       - dashboard: dashboard_vectors
       - ccp: ccp_vectors
       - media: IMAGE_CAPTION artifacts + MEDIA vectors (ingest-only pipeline)
+      - glide_company: company_profiles + company_vectors
+      - glide_*: glide KB tables
     """
     settings = _get_settings(request)
     results: Dict[str, Any] = {}
 
+    # ---- Core backfills ----
     if source in ("ccp", "all"):
         results["ccp"] = ingest_ccp(settings)
 
@@ -136,6 +149,11 @@ def admin_ingest(
     if source in ("dashboard", "all"):
         results["dashboard"] = ingest_dashboard(settings, limit=max(1, int(limit)))
 
+    # ---- Glide company backfill (Phase 3) ----
+    if source in ("glide_company", "glide_all", "all"):
+        results["glide_company"] = ingest_glide_company(settings, limit=max(0, int(limit)))
+
+    # ---- Media backfill (unchanged logic, but keep it isolated correctly) ----
     if source in ("media", "all"):
         from .tools.sheets_tool import SheetsTool, _key, _norm_value
 
@@ -239,7 +257,7 @@ def admin_ingest(
                     "meta": {
                         "ingest_only": True,
                         "media_only": True,
-                        "tenant_id": tenant_id,  # ✅ key fix
+                        "tenant_id": tenant_id,
                     },
                 },
             )
@@ -269,6 +287,8 @@ def admin_ingest(
             "error_samples": err_samples,
             "note": "Media backfill runs CHECKIN_UPDATED with meta.tenant_id + ingest_only/media_only for stable tenant resolution.",
         }
+
+    # ---- Projects validation ----
     if source in ("projects", "all"):
         from .tools.sheets_tool import SheetsTool, _key as skey, _norm_value as snorm
 
@@ -312,14 +332,18 @@ def admin_ingest(
             "bad_samples": bad_samples,
             "note": "Validation-only: reads Project tab and reports missing legacy_id/tenant_id. No DB writes.",
         }
+
     # -----------------------
-    # Glide backfill (Phase 2)
+    # Glide KB backfills (Phase 2)
     # -----------------------
     if source in ("glide_project", "glide_all", "all"):
         if (settings.glide_project_table or "").strip():
             results["glide_project"] = ingest_glide_project(settings, limit=max(0, int(limit)))
         else:
-            results["glide_project"] = {"ok": True, "note": "Skipped: GLIDE_PROJECT_TABLE not set (Projects come from Sheets in this setup)."}
+            results["glide_project"] = {
+                "ok": True,
+                "note": "Skipped: GLIDE_PROJECT_TABLE not set (Projects come from Sheets in this setup).",
+            }
 
     if source in ("glide_raw_material", "glide_all", "all"):
         results["glide_raw_material"] = ingest_glide_raw_material(settings, limit=max(0, int(limit)))
@@ -329,4 +353,5 @@ def admin_ingest(
 
     if source in ("glide_boughtouts", "glide_all", "all"):
         results["glide_boughtouts"] = ingest_glide_boughtouts(settings, limit=max(0, int(limit)))
+
     return {"ok": True, "results": results}

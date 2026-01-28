@@ -96,6 +96,10 @@ def _normalize_table_key(k: str) -> str:
         "bo": "boughtouts",
         "project": "project",
         "projects": "project",
+        "company": "company",
+        "companies": "company",
+        "company_profile": "company",
+        "company_profiles": "company",
     }
     return alias.get(k, k)
 

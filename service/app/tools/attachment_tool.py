@@ -1,4 +1,16 @@
 # service/app/tools/attachment_tool.py
+# Tool to resolve and fetch attachments from various sources.
+# Supports:
+#   - direct URLs (http/https)
+#   - Google Drive URLs and relative paths
+#  - identifies mime types and whether the attachment is an image or PDF
+#  - fetches bytes via requests or Drive API
+#  - splits cell references with multiple attachments
+# Usage:
+#   resolver = AttachmentResolver(drive_tool)
+#   resolved = resolver.resolve(cell_value)
+#   bytes_data = resolver.fetch_bytes(resolved) if resolved else None   
+# Happy coding!
 from __future__ import annotations
 
 from dataclasses import dataclass

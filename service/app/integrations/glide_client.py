@@ -57,7 +57,7 @@ class GlideClient:
         url = f"{s.glide_base_url}/api/function/queryTables"
 
         table = s.glide_company_table
-        col_rowid = s.glide_company_rowid_column or "Row ID"
+        col_rowid = s.glide_company_rowid_column or "$rowID"
 
         sql = f'SELECT * FROM "{table}" WHERE "{col_rowid}" = $1 LIMIT 1'
         payload = {
@@ -198,7 +198,7 @@ class GlideClient:
         table_name: str,
         row_id: str,
         *,
-        rowid_column: str = "Row ID",
+        rowid_column: str = "$rowID",
         timeout: int = 30,
     ) -> Optional[Dict[str, Any]]:
         """

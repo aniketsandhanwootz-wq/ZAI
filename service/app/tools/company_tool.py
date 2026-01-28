@@ -6,7 +6,7 @@ import re
 
 from ..config import Settings
 from ..integrations.glide_client import GlideClient, CompanyProfile
-
+from .company_cache_tool import CompanyCacheTool
 
 def _slug(s: str) -> str:
     s = (s or "").strip().lower()
@@ -85,6 +85,7 @@ class CompanyTool:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.glide = GlideClient(settings)
+        self.cache = CompanyCacheTool(settings)
 
     def from_project_name(self, project_name: str, *, tenant_row_id: str = "") -> Optional[CompanyContext]:
         """
@@ -107,34 +108,58 @@ class CompanyTool:
             company_description="",
         )
 
-    def get_company_context(self, tenant_row_id: str) -> Optional[CompanyContext]:
-        """
-        Primary: Glide (if configured).
-        """
-        tenant_row_id = (tenant_row_id or "").strip()
-        if not tenant_row_id:
-            return None
+def get_company_context(self, tenant_row_id: str) -> Optional[CompanyContext]:
+    """
+    Primary: cached DB (company_profiles).
+    Fallback: Glide (if configured), then warm-cache.
+    """
+    tenant_row_id = (tenant_row_id or "").strip()
+    if not tenant_row_id:
+        return None
 
-        prof: CompanyProfile | None = None
-        try:
-            prof = self.glide.get_company_by_row_id(tenant_row_id)
-        except Exception:
-            prof = None
+    # 1) cache-first
+    cached = self.cache.get(tenant_row_id)
+    if cached:
+        name = (cached.get("company_name") or "").strip()
+        desc = (cached.get("company_description") or "").strip()
+        if name or desc:
+            key = normalize_company_key(name, fallback=tenant_row_id)
+            return CompanyContext(
+                tenant_row_id=tenant_row_id,
+                company_key=key,
+                company_name=name,
+                company_description=desc,
+            )
 
-        name = (prof.name if prof else "").strip()
-        desc = (prof.description if prof else "").strip()
+    # 2) fallback: Glide
+    prof: CompanyProfile | None = None
+    try:
+        prof = self.glide.get_company_by_row_id(tenant_row_id)
+    except Exception:
+        prof = None
 
-        # ✅ Normalize name for routing (e.g. "Unnati 123" -> "Unnati")
-        key = normalize_company_key(name, fallback=tenant_row_id)
+    name = (prof.name if prof else "").strip()
+    desc = (prof.description if prof else "").strip()
 
+    if not name and not desc:
+        return None
 
-        # If Glide returns nothing useful, treat as "not found"
-        if not name and not desc:
-            return None
-
-        return CompanyContext(
+    # warm cache best-effort
+    try:
+        self.cache.upsert(
             tenant_row_id=tenant_row_id,
-            company_key=key,
             company_name=name,
             company_description=desc,
+            raw=(prof.raw if prof else {}),
+            source="glide",
         )
+    except Exception:
+        pass
+
+    key = normalize_company_key(name, fallback=tenant_row_id)
+    return CompanyContext(
+        tenant_row_id=tenant_row_id,
+        company_key=key,
+        company_name=name,
+        company_description=desc,
+    )

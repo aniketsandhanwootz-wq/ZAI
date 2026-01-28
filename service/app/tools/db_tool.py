@@ -1,3 +1,5 @@
+# service/app/tools/db_tool.py
+# Database utility tool for managing artifacts.
 from __future__ import annotations
 
 from typing import Any, Dict, Set
