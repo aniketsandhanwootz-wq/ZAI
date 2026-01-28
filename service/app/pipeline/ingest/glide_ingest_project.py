@@ -7,6 +7,12 @@
 # If you need to refer to any other tab ingestion from Glide, please refer to respective files like glide_ingest_raw_material.py, glide_ingest_processes.py, glide_ingest_boughtouts.py etc.
 # Thank you for understanding!
 # If you have any questions, please reach out to Aniket Sandhan for clarification.
+# Happy coding!
+# Regards,
+# Aniket Sandhan
+# AI Language Model (Gemini-3 Pro)
+# ZAI Team
+# end of useless file notice
 from __future__ import annotations
 
 from ...config import Settings

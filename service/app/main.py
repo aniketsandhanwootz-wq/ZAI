@@ -14,11 +14,10 @@ from .pipeline.graph import run_event_graph
 from .pipeline.ingest.ccp_ingest import ingest_ccp
 from .pipeline.ingest.history_ingest import ingest_history
 from .pipeline.ingest.dashboard_ingest import ingest_dashboard
-from .pipeline.ingest.sheets_ingest_project import ingest_sheet_projects
 from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 from .schemas.webhook import WebhookPayload
-from .routers import appsheet_webhook_router, teams_test_router
+from .routers import appsheet_webhook_router, teams_test_router, glide_webhook_router
 from .pipeline.ingest.glide_ingest_project import ingest_glide_project
 from .pipeline.ingest.glide_ingest_raw_material import ingest_glide_raw_material
 from .pipeline.ingest.glide_ingest_processes import ingest_glide_processes
@@ -63,6 +62,7 @@ app = FastAPI(title="Wootz Checkin AI (MVP)", lifespan=lifespan)
 # Routers
 app.include_router(appsheet_webhook_router)
 app.include_router(teams_test_router)
+app.include_router(glide_webhook_router)
 
 
 @app.middleware("http")
@@ -270,8 +270,48 @@ def admin_ingest(
             "note": "Media backfill runs CHECKIN_UPDATED with meta.tenant_id + ingest_only/media_only for stable tenant resolution.",
         }
     if source in ("projects", "all"):
-        # Ingest Project tab (Google Sheets) into KB tables (glide_kb_items / glide_kb_vectors)
-        results["projects"] = ingest_sheet_projects(settings, limit=max(0, int(limit)))
+        from .tools.sheets_tool import SheetsTool, _key as skey, _norm_value as snorm
+
+        sheets = SheetsTool(settings)
+        projects = sheets.list_projects() or []
+
+        # mapped keys
+        k_legacy = skey(sheets.map.col("project", "legacy_id"))
+        k_tenant = skey(sheets.map.col("project", "company_row_id"))
+        k_name = skey(sheets.map.col("project", "project_name"))
+        k_part = skey(sheets.map.col("project", "part_number"))
+
+        if limit and limit > 0:
+            projects = projects[:limit]
+
+        missing_legacy = 0
+        missing_tenant = 0
+        bad_samples = []
+
+        for pr in projects:
+            lid = snorm((pr or {}).get(k_legacy, ""))
+            tid = snorm((pr or {}).get(k_tenant, ""))
+            pn = snorm((pr or {}).get(k_name, ""))
+            part = snorm((pr or {}).get(k_part, ""))
+
+            if not lid:
+                missing_legacy += 1
+            if not tid:
+                missing_tenant += 1
+
+            if (not lid or not tid) and len(bad_samples) < 20:
+                bad_samples.append(
+                    {"legacy_id": lid, "tenant_id": tid, "project_name": pn, "part_number": part}
+                )
+
+        results["projects"] = {
+            "ok": True,
+            "rows_seen": len(projects),
+            "missing_legacy_id": missing_legacy,
+            "missing_tenant_id": missing_tenant,
+            "bad_samples": bad_samples,
+            "note": "Validation-only: reads Project tab and reports missing legacy_id/tenant_id. No DB writes.",
+        }
     # -----------------------
     # Glide backfill (Phase 2)
     # -----------------------
