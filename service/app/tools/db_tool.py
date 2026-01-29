@@ -146,3 +146,145 @@ class DBTool:
         except Exception:
             return {}
         return out
+
+    # ----------------------------
+    # Checkin file artifacts (Files column)
+    # ----------------------------
+
+    def upsert_checkin_file_artifact(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        source_hash: str,
+        source_ref: str = "",
+        filename: str = "",
+        mime_type: str = "",
+        byte_size: int = 0,
+        drive_file_id: str = "",
+        direct_url: str = "",
+        content_hash: str = "",
+        extracted_text: str = "",
+        extracted_json: Dict[str, Any] | None = None,
+        analysis_json: Dict[str, Any] | None = None,
+    ) -> None:
+        q = """
+        INSERT INTO checkin_file_artifacts (
+          tenant_id, checkin_id, source_hash,
+          source_ref, filename, mime_type, byte_size,
+          drive_file_id, direct_url, content_hash,
+          extracted_text, extracted_json, analysis_json,
+          updated_at
+        )
+        VALUES (
+          %s,%s,%s,
+          %s,%s,%s,%s,
+          %s,%s,%s,
+          %s,%s::jsonb,%s::jsonb,
+          now()
+        )
+        ON CONFLICT (tenant_id, checkin_id, source_hash)
+        DO UPDATE SET
+          source_ref=EXCLUDED.source_ref,
+          filename=EXCLUDED.filename,
+          mime_type=EXCLUDED.mime_type,
+          byte_size=EXCLUDED.byte_size,
+          drive_file_id=EXCLUDED.drive_file_id,
+          direct_url=EXCLUDED.direct_url,
+          content_hash=EXCLUDED.content_hash,
+          extracted_text=EXCLUDED.extracted_text,
+          extracted_json=EXCLUDED.extracted_json,
+          analysis_json=EXCLUDED.analysis_json,
+          updated_at=now()
+        """
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    q,
+                    (
+                        tenant_id,
+                        checkin_id,
+                        source_hash,
+                        source_ref or None,
+                        filename or None,
+                        mime_type or None,
+                        int(byte_size or 0),
+                        drive_file_id or None,
+                        direct_url or None,
+                        content_hash or None,
+                        extracted_text or "",
+                        json.dumps(extracted_json or {}),
+                        json.dumps(analysis_json or {}),
+                    ),
+                )
+
+    def checkin_file_artifact_exists(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        source_hash: str,
+        content_hash: str = "",
+    ) -> bool:
+        """
+        Returns True if already processed.
+        If content_hash is given, require that match (stronger idempotency).
+        """
+        if content_hash:
+            q = """
+            SELECT 1
+            FROM checkin_file_artifacts
+            WHERE tenant_id=%s AND checkin_id=%s AND source_hash=%s AND COALESCE(content_hash,'')=%s
+            LIMIT 1
+            """
+            args = (tenant_id, checkin_id, source_hash, content_hash)
+        else:
+            q = """
+            SELECT 1
+            FROM checkin_file_artifacts
+            WHERE tenant_id=%s AND checkin_id=%s AND source_hash=%s
+            LIMIT 1
+            """
+            args = (tenant_id, checkin_id, source_hash)
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(q, args)
+                return cur.fetchone() is not None
+
+    def get_checkin_file_briefs(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        max_items: int = 6,
+    ) -> list[dict]:
+        """
+        Returns brief info for composing prompt context.
+        """
+        q = """
+        SELECT
+          source_hash,
+          COALESCE(filename,'') AS filename,
+          COALESCE(mime_type,'') AS mime_type,
+          COALESCE(analysis_json,'{}'::jsonb) AS analysis_json
+        FROM checkin_file_artifacts
+        WHERE tenant_id=%s AND checkin_id=%s
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """
+        out: list[dict] = []
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(q, (tenant_id, checkin_id, int(max_items)))
+                rows = cur.fetchall() or []
+                for (h, fn, mt, aj) in rows:
+                    out.append(
+                        {
+                            "source_hash": str(h or ""),
+                            "filename": str(fn or ""),
+                            "mime_type": str(mt or ""),
+                            "analysis_json": aj if isinstance(aj, dict) else {},
+                        }
+                    )
+        return out

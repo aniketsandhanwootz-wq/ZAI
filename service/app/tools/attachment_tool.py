@@ -171,25 +171,38 @@ class AttachmentResolver:
             rel_path=raw,
         )
 
-    def fetch_bytes(self, att: ResolvedAttachment, *, timeout: int = 40) -> Optional[bytes]:
+    def fetch_bytes(
+        self,
+        att: ResolvedAttachment,
+        *,
+        timeout: int = 40,
+        max_bytes: int = 15_000_000,
+    ) -> Optional[bytes]:
         if not att:
             return None
 
-        # URL bytes
+        # 1) Direct URL bytes (streaming + max size safety)
         if att.direct_url:
             try:
-                r = requests.get(att.direct_url, timeout=timeout)
-                r.raise_for_status()
-                return r.content
+                with requests.get(att.direct_url, timeout=timeout, stream=True) as r:
+                    r.raise_for_status()
+                    buf = bytearray()
+                    for chunk in r.iter_content(chunk_size=256 * 1024):
+                        if not chunk:
+                            continue
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            return None
+                    return bytes(buf)
             except Exception:
                 return None
 
-        # Drive bytes
+        # 2) Drive bytes
         if att.drive_file_id:
+            # (optional) implement size check via Drive metadata later
             return self.drive.download_file_bytes(att.drive_file_id)
 
         return None
-
 
 def split_cell_refs(cell: str) -> list[str]:
     """

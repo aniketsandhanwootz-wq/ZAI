@@ -48,6 +48,7 @@ def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
 load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
+analyze_attachments = _resolve_node(".nodes.analyze_attachments", ["analyze_attachments", "run", "node"])
 upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
 retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
 rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
@@ -336,6 +337,8 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
 
         state = _timed("build_thread_snapshot", build_thread_snapshot)
         state = _timed("analyze_media", analyze_media)
+        # NEW: ingest + analyze "Files" attachments (idempotent)
+        state = _timed("analyze_attachments", analyze_attachments)
 
         # ingest-only modes
         if ingest_only:

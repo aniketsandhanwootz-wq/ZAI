@@ -19,6 +19,7 @@ columns:
     status: "Status"
     description: "Description"
     inspection_image_url: "Inspection Image URL"
+    files: "Files"                           
 
   project:
     project_name: "Project name"

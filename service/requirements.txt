@@ -29,3 +29,6 @@ Pillow==10.4.0
 # Google Auth libraries
 google-auth-oauthlib==1.2.1
 google-auth-httplib2==0.2.0
+
+pymupdf
+openpyxl

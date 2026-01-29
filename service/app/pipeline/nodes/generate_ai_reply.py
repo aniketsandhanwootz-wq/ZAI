@@ -78,6 +78,10 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             f"- What matters to them / constraints (from Glide): {company_desc or '(not provided)'}\n"
         ).strip()
 
+    # NEW: file attachment context (from analyze_attachments node)
+    attachment_context = (state.get("attachment_context") or "").strip()
+    if attachment_context:
+        attachment_context = "ATTACHMENT CONTEXT (from Files):\n" + attachment_context.strip()
     template = _load_prompt_template()
     prompt = _render_template_safe(
         template,
@@ -86,9 +90,12 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             "ctx": ctx,
             "closure_notes": closure_notes,
             "company_context": company_context,
+            "attachment_context": attachment_context,
         },
     )
 
+    if attachment_context and "{attachment_context}" not in template:
+        prompt = (prompt.strip() + "\n\n" + attachment_context.strip()).strip()
     images = state.get("media_images") or []
     if not isinstance(images, list):
         images = []
