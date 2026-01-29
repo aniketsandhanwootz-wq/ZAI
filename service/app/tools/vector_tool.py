@@ -630,3 +630,87 @@ class VectorTool:
                 }
                 for r in rows
             ]
+
+    def search_glide_kb_chunks(
+        self,
+        *,
+        tenant_id: str,
+        query_embedding: List[float],
+        top_k: int = 30,
+        project_name: Optional[str] = None,
+        part_number: Optional[str] = None,
+        legacy_id: Optional[str] = None,
+        table_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Vector search over Glide KB, joined with item metadata.
+        Filters are "soft": match exact OR allow NULL/empty (so generic KB still works).
+
+        table_names: if provided, restrict to those tables (e.g. ["raw_material","processes","boughtouts"])
+        """
+        if not tenant_id:
+            return []
+
+        where = ["i.tenant_id=%s"]
+        args: List[Any] = [tenant_id]
+
+        # soft filters (exact OR missing)
+        if project_name:
+            where.append("(i.project_name=%s OR i.project_name IS NULL OR i.project_name='')")
+            args.append(project_name)
+
+        if part_number:
+            where.append("(i.part_number=%s OR i.part_number IS NULL OR i.part_number='')")
+            args.append(part_number)
+
+        if legacy_id:
+            where.append("(i.legacy_id=%s OR i.legacy_id IS NULL OR i.legacy_id='')")
+            args.append(legacy_id)
+
+        if table_names:
+            # psycopg2 will adapt python list into PG array
+            where.append("i.table_name = ANY(%s)")
+            args.append(table_names)
+
+        sql = f"""
+        SELECT
+          i.table_name,
+          i.row_id,
+          i.item_id,
+          i.title,
+          i.project_name,
+          i.part_number,
+          i.legacy_id,
+          v.chunk_index,
+          v.chunk_text,
+          (v.embedding <=> %s::vector) AS distance
+        FROM glide_kb_vectors v
+        JOIN glide_kb_items i
+          ON i.tenant_id=v.tenant_id AND i.item_id=v.item_id
+        WHERE {" AND ".join(where)}
+        ORDER BY v.embedding <=> %s::vector
+        LIMIT %s
+        """
+        qv = _vec_str(query_embedding)
+
+        with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, [qv, *args, qv, int(top_k)])
+            rows = cur.fetchall() or []
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "table_name": r.get("table_name") or "",
+                    "row_id": r.get("row_id") or "",
+                    "item_id": r.get("item_id") or "",
+                    "title": r.get("title") or "",
+                    "project_name": r.get("project_name") or "",
+                    "part_number": r.get("part_number") or "",
+                    "legacy_id": r.get("legacy_id") or "",
+                    "chunk_index": int(r.get("chunk_index") or 0),
+                    "text": r.get("chunk_text") or "",
+                    "distance": float(r.get("distance") or 0.0),
+                }
+            )
+        return out

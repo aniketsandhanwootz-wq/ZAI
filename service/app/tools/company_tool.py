@@ -108,58 +108,58 @@ class CompanyTool:
             company_description="",
         )
 
-def get_company_context(self, tenant_row_id: str) -> Optional[CompanyContext]:
-    """
-    Primary: cached DB (company_profiles).
-    Fallback: Glide (if configured), then warm-cache.
-    """
-    tenant_row_id = (tenant_row_id or "").strip()
-    if not tenant_row_id:
-        return None
+    def get_company_context(self, tenant_row_id: str) -> Optional[CompanyContext]:
+        """
+        Primary: cached DB (company_profiles).
+        Fallback: Glide (if configured), then warm-cache.
+        """
+        tenant_row_id = (tenant_row_id or "").strip()
+        if not tenant_row_id:
+            return None
 
-    # 1) cache-first
-    cached = self.cache.get(tenant_row_id)
-    if cached:
-        name = (cached.get("company_name") or "").strip()
-        desc = (cached.get("company_description") or "").strip()
-        if name or desc:
-            key = normalize_company_key(name, fallback=tenant_row_id)
-            return CompanyContext(
+        # 1) cache-first
+        cached = self.cache.get(tenant_row_id)
+        if cached:
+            name = (cached.get("company_name") or "").strip()
+            desc = (cached.get("company_description") or "").strip()
+            if name or desc:
+                key = normalize_company_key(name, fallback=tenant_row_id)
+                return CompanyContext(
+                    tenant_row_id=tenant_row_id,
+                    company_key=key,
+                    company_name=name,
+                    company_description=desc,
+                )
+
+        # 2) fallback: Glide
+        prof: CompanyProfile | None = None
+        try:
+            prof = self.glide.get_company_by_row_id(tenant_row_id)
+        except Exception:
+            prof = None
+
+        name = (prof.name if prof else "").strip()
+        desc = (prof.description if prof else "").strip()
+
+        if not name and not desc:
+            return None
+
+        # warm cache best-effort
+        try:
+            self.cache.upsert(
                 tenant_row_id=tenant_row_id,
-                company_key=key,
                 company_name=name,
                 company_description=desc,
+                raw=(prof.raw if prof else {}),
+                source="glide",
             )
+        except Exception:
+            pass
 
-    # 2) fallback: Glide
-    prof: CompanyProfile | None = None
-    try:
-        prof = self.glide.get_company_by_row_id(tenant_row_id)
-    except Exception:
-        prof = None
-
-    name = (prof.name if prof else "").strip()
-    desc = (prof.description if prof else "").strip()
-
-    if not name and not desc:
-        return None
-
-    # warm cache best-effort
-    try:
-        self.cache.upsert(
+        key = normalize_company_key(name, fallback=tenant_row_id)
+        return CompanyContext(
             tenant_row_id=tenant_row_id,
+            company_key=key,
             company_name=name,
             company_description=desc,
-            raw=(prof.raw if prof else {}),
-            source="glide",
         )
-    except Exception:
-        pass
-
-    key = normalize_company_key(name, fallback=tenant_row_id)
-    return CompanyContext(
-        tenant_row_id=tenant_row_id,
-        company_key=key,
-        company_name=name,
-        company_description=desc,
-    )

@@ -28,6 +28,7 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
         state["similar_media"] = []
         state["relevant_ccp_chunks"] = []
         state["relevant_dashboard_updates"] = []
+        state["relevant_glide_kb_chunks"] = []
         return state
 
     embedder = EmbedTool(settings)
@@ -72,6 +73,47 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
     project_name = state.get("project_name")
     part_number = state.get("part_number")
 
+    legacy_id = state.get("legacy_id")
+
+    # 0.5) Glide KB chunks (RawMaterial/Processes/Boughtouts MUST be included)
+    critical_tables = ["raw_material", "processes", "boughtouts"]
+
+    def _dedup_chunks(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        out = []
+        for it in items or []:
+            k = (
+                (it.get("table_name") or "").strip(),
+                (it.get("item_id") or "").strip(),
+                int(it.get("chunk_index") or 0),
+            )
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(it)
+        return out
+
+    critical = vector_db.search_glide_kb_chunks(
+        tenant_id=tenant_id,
+        query_embedding=q,
+        top_k=36,  # ~12 chunks per table-ish after rerank trims
+        project_name=project_name,
+        part_number=part_number,
+        legacy_id=legacy_id,
+        table_names=critical_tables,
+    )
+
+    general = vector_db.search_glide_kb_chunks(
+        tenant_id=tenant_id,
+        query_embedding=q,
+        top_k=40,
+        project_name=project_name,
+        part_number=part_number,
+        legacy_id=legacy_id,
+        table_names=None,
+    )
+
+    state["relevant_glide_kb_chunks"] = _dedup_chunks((critical or []) + (general or []))
     # 1) Similar PROBLEMS
     problems = vector_db.search_incidents(
         tenant_id=tenant_id,
