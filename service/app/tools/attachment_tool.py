@@ -27,7 +27,28 @@ _DRIVE_ID_PATTERNS = [
     re.compile(r"[?&]id=([a-zA-Z0-9_-]+)"),
 ]
 
+_EMAIL_RX = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.I)
 
+def _is_garbage_ref(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return True
+
+    low = t.lower()
+
+    # common AppSheet garbage
+    if low.startswith("unable to load image data"):
+        return True
+
+    # plain emails should never be treated as Drive paths
+    if _EMAIL_RX.match(t):
+        return True
+
+    # lines that are not url and not a path but contain #filename=
+    if "#filename=" in low and not _looks_like_url(t) and "/" not in t:
+        return True
+
+    return False
 def _looks_like_url(s: str) -> bool:
     return bool(re.match(r"^https?://", (s or "").strip(), re.I))
 
@@ -74,7 +95,7 @@ class AttachmentResolver:
 
     def resolve(self, ref: str) -> Optional[ResolvedAttachment]:
         raw = (ref or "").strip()
-        if not raw:
+        if not raw or _is_garbage_ref(raw):
             return None
 
         # Case 1: URL
@@ -210,11 +231,26 @@ def split_cell_refs(cell: str) -> list[str]:
       - comma separated
       - newline separated
       - mixed
+    We filter garbage lines (emails / "Unable to load image data..." etc.)
     """
     s = (cell or "").strip()
     if not s:
         return []
+
     s = s.replace("\r", "\n")
     s = s.replace("\n", ",")
+
     parts = [p.strip() for p in s.split(",")]
-    return [p for p in parts if p]
+    out: list[str] = []
+
+    for p in parts:
+        if not p:
+            continue
+        if _is_garbage_ref(p):
+            continue
+
+        # accept only URLs or drive-ish relative paths (must contain '/')
+        if _looks_like_url(p) or ("/" in p):
+            out.append(p)
+
+    return out

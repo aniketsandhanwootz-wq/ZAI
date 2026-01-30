@@ -43,19 +43,22 @@ def _find_files_cell_from_row(checkin_row: Dict[str, Any]) -> str:
 
 def iter_checkin_ids_with_files(sheets: SheetsTool, *, limit: Optional[int] = None) -> Iterable[str]:
     rows = sheets.list_checkins()
-    # mapping-driven checkin_id header -> dict key
+
     checkin_id_key = _key(sheets.map.col("checkin", "checkin_id"))
+    files_key     = _key(sheets.map.col("checkin", "files"))  # <-- mapping.yaml must have this
 
     seen = set()
     count = 0
+
     for r in rows:
         if not isinstance(r, dict):
             continue
+
         cid = str(r.get(checkin_id_key) or "").strip()
         if not cid or cid in seen:
             continue
 
-        files_cell = _find_files_cell_from_row(r)
+        files_cell = str(r.get(files_key) or "").strip()
         if not files_cell:
             continue
 
@@ -65,8 +68,6 @@ def iter_checkin_ids_with_files(sheets: SheetsTool, *, limit: Optional[int] = No
         count += 1
         if limit and count >= int(limit):
             return
-
-
 def main(argv: List[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="Process only first N checkins (0 = all)")
@@ -106,7 +107,24 @@ def main(argv: List[str]) -> int:
             state = analyze_attachments(settings, state)
 
             ok += 1
-            print(f"[OK] checkin_id={checkin_id} analyzed={len(state.get('attachments_analyzed') or [])}")
+            items = state.get("attachments_analyzed") or []
+            print(f"[OK] checkin_id={checkin_id} analyzed={len(items)}")
+
+            # Print what exactly was analyzed/skipped
+            for it in items:
+                ref = str(it.get("ref") or "").strip()
+                fn  = str(it.get("filename") or "").strip()
+                okf = it.get("ok")
+                skp = it.get("skipped", False)
+                reason = str(it.get("reason") or "").strip()
+
+                status = "OK" if okf else "FAIL"
+                if skp:
+                    status = "SKIP"
+
+                # keep line short but useful
+                extra = f" reason={reason}" if reason else ""
+                print(f"  - {status} file={fn or '(no-filename)'} ref={ref}{extra}")
         except Exception as e:
             err += 1
             print(f"[ERR] checkin_id={checkin_id} {e}")
