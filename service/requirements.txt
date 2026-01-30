@@ -20,6 +20,7 @@ rq==2.0.0
 # LangChain + LangGraph (code mode)
 langchain==0.3.12
 langgraph==0.2.53
+langsmith
 
 pyyaml==6.0.2
 pypdf==5.1.0
