@@ -87,7 +87,11 @@ def extract_any(*, filename: str, mime_type: str, data: bytes, vision_caption_fn
 
     if mime.endswith("spreadsheetml.sheet") or filename.lower().endswith(".xlsx"):
         from .xlsx_extractor import extract_xlsx
-        return extract_xlsx(filename=filename, data=data)
+        return extract_xlsx(
+            filename=filename,
+            data=data,
+            vision_caption_fn=vision_caption_fn,  # ✅ now captions embedded images too
+        )
 
     return ExtractResult(
         doc_type="unknown",
