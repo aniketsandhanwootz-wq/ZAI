@@ -11,7 +11,13 @@ from ...tools.llm_tool import LLMTool
 from ...tools.embed_tool import EmbedTool
 from ...tools.vector_tool import VectorTool
 from .rerank_context import rerank_context
+import json
+import hashlib
+import secrets
+import string
 
+from ...tools.db_tool import DBTool
+from ...integrations.appsheet_client import AppSheetClient
 
 # -------------------------
 # Prompt loader
@@ -39,6 +45,46 @@ def _load_prompt() -> str:
 # Helpers
 # -------------------------
 
+_ALPHANUM = string.ascii_letters + string.digits
+
+def _rand_cue_id(n: int = 10) -> str:
+    return "".join(secrets.choice(_ALPHANUM) for _ in range(n))
+
+def _now_timestamp_str() -> str:
+    # Match sheet style like: 01/07/26 12:49 PM
+    try:
+        from zoneinfo import ZoneInfo
+        dt = datetime.now(ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        dt = datetime.now()
+    return dt.strftime("%m/%d/%y %I:%M %p")
+
+def _payload_hash(payload: dict) -> str:
+    b = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(b).hexdigest()
+
+def _split_cues(text: str, max_items: int = 10) -> list[str]:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    # remove bullets/numbering
+    out: list[str] = []
+    for ln in lines:
+        ln = re.sub(r"^\-\s*\[\s*\]\s*", "", ln).strip()
+        ln = re.sub(r"^\-\s*", "", ln).strip()
+        ln = re.sub(r"^\•\s*", "", ln).strip()
+        ln = re.sub(r"^\d+[\).]\s*", "", ln).strip()
+        if ln:
+            out.append(ln)
+        if len(out) >= max_items:
+            break
+    # dedup (case-insensitive)
+    seen = set()
+    dedup: list[str] = []
+    for x in out:
+        k = re.sub(r"\s+", " ", x).strip().lower()
+        if k and k not in seen:
+            dedup.append(x)
+            seen.add(k)
+    return dedup[:max_items]
 def _is_mfg(status: str) -> bool:
     return (status or "").strip().lower() == "mfg"
 
@@ -544,6 +590,63 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     col_out = sheets.map.col("project", "ai_critcal_point")
     ok = sheets.update_project_cell_by_legacy_id(legacy_id, column_name=col_out, value=chips)
 
+    # -------------------------
+    # NEW: Append cues into AppSheet (idempotent)
+    # -------------------------
+    try:
+        client = AppSheetClient(settings)
+        if client.enabled() and ok:
+            cue_lines = _split_cues(chips, max_items=10)  # from generated chips (3-4 now, later can grow)
+            if cue_lines:
+                generated_at = _now_timestamp_str()
+
+                # idempotency per (tenant_id, legacy_id, cue_text)
+                db = DBTool(settings.database_url)
+                existing = db.existing_artifact_source_hashes(
+                    tenant_id=tenant_id,
+                    checkin_id=legacy_id,              # reuse field as "project id scope"
+                    artifact_type="APPSHEET_CUE",
+                )
+
+                cue_items: list[dict[str, str]] = []
+                for cue in cue_lines:
+                    payload = {"legacy_id": legacy_id, "cue": cue}
+                    h = _payload_hash(payload)
+                    if h in existing:
+                        continue
+                    cue_items.append({"cue_id": _rand_cue_id(), "cue": cue})
+
+                if cue_items:
+                    client.add_cues_rows(
+                        legacy_id=legacy_id,
+                        cue_items=cue_items,
+                        generated_at=generated_at,
+                    )
+
+                    # record artifacts
+                    run_id = (state.get("run_id") or "").strip()
+                    if run_id:
+                        for cue in cue_items:
+                            h = _payload_hash({"legacy_id": legacy_id, "cue": cue["cue"]})
+                            db.insert_artifact(
+                                run_id=run_id,
+                                artifact_type="APPSHEET_CUE",
+                                url="appsheet_cues",
+                                meta={
+                                    "tenant_id": tenant_id,
+                                    "checkin_id": legacy_id,
+                                    "source_hash": h,
+                                    "legacy_id": legacy_id,
+                                    "cue_id": cue["cue_id"],
+                                },
+                            )
+
+                    (state.get("logs") or []).append(f"appsheet_cues: appended={len(cue_items)} legacy_id={legacy_id}")
+                else:
+                    (state.get("logs") or []).append(f"appsheet_cues: nothing new (idempotency) legacy_id={legacy_id}")
+    except Exception as e:
+        (state.get("logs") or []).append(f"appsheet_cues: non-fatal failure: {e}")
+        
     state["assembly_todo"] = chips
     state["assembly_todo_written"] = bool(ok)
     (state.get("logs") or []).append(

@@ -229,6 +229,18 @@ class Settings:
     # Teams
     teams_webhook_url: str
 
+    # AppSheet (Cues)
+    appsheet_base_url: str
+    appsheet_app_id: str
+    appsheet_access_key: str
+    appsheet_cues_table: str
+
+    # Optional column overrides (if your table uses different headers)
+    appsheet_cues_col_cue: str
+    appsheet_cues_col_cue_id: str
+    appsheet_cues_col_id: str
+    appsheet_cues_col_generated_at: str
+
     # Power Automate (Teams routing flow webhook)
     power_automate_webhook_url: str
 
@@ -321,6 +333,18 @@ def load_settings() -> Settings:
 
     teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
 
+    # AppSheet (Cues)
+    appsheet_base_url = _get_env("APPSHEET_BASE_URL", "https://www.appsheet.com").rstrip("/")
+    appsheet_app_id = _get_env("APPSHEET_APP_ID", "")
+    appsheet_access_key = _get_env("APPSHEET_ACCESS_KEY", "")
+    appsheet_cues_table = _get_env("APPSHEET_CUES_TABLE", "")
+
+    # Column names (override only if your AppSheet columns differ)
+    appsheet_cues_col_cue = _get_env("APPSHEET_CUES_COL_CUE", "Cue")
+    appsheet_cues_col_cue_id = _get_env("APPSHEET_CUES_COL_CUE_ID", "Cue ID")
+    appsheet_cues_col_id = _get_env("APPSHEET_CUES_COL_ID", "ID")
+    appsheet_cues_col_generated_at = _get_env("APPSHEET_CUES_COL_DATE", "Date")
+
     power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
 
     # Sheets auth
@@ -404,6 +428,14 @@ def load_settings() -> Settings:
         vision_api_key=vision_api_key,
         vision_model=vision_model,
         teams_webhook_url=teams_webhook_url,
+        appsheet_base_url=appsheet_base_url,
+        appsheet_app_id=appsheet_app_id,
+        appsheet_access_key=appsheet_access_key,
+        appsheet_cues_table=appsheet_cues_table,
+        appsheet_cues_col_cue=appsheet_cues_col_cue,
+        appsheet_cues_col_cue_id=appsheet_cues_col_cue_id,
+        appsheet_cues_col_id=appsheet_cues_col_id,
+        appsheet_cues_col_generated_at=appsheet_cues_col_generated_at,
         power_automate_webhook_url=power_automate_webhook_url,
         webhook_secret=webhook_secret,
         llm_provider=llm_provider,
