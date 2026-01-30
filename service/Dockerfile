@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy code + packages + contracts
 COPY service/app /app/app
+COPY service/scripts /app/app/scripts
 COPY packages /app/packages
 
 # Keep legacy absolute path working (/packages/...)
