@@ -2,7 +2,7 @@ from typing import Any, Dict, List
 import logging
 
 from .config import load_settings
-from .pipeline.graph import run_event_graph
+from .lc.graph.graph import run_event_graph_lc
 from .logctx import bind_run_id
 from .pipeline.ingest.run_log import RunLog
 
@@ -16,7 +16,7 @@ logger = logging.getLogger("zai.worker")
 
 def process_event_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Existing: executed by RQ worker for main event graph.
+    Executed by RQ worker for main event graph (LangGraph version).
     """
     settings = load_settings()
     logger.info(
@@ -25,7 +25,7 @@ def process_event_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("checkin_id"),
         payload.get("conversation_id"),
     )
-    return run_event_graph(settings, payload)
+    return run_event_graph_lc(settings, payload)
 
 
 def _normalize_table_key(k: str) -> str:
