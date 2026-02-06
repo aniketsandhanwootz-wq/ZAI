@@ -211,7 +211,7 @@ class Settings:
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
-
+    sheets_mapping_path: str
     # Optional: separate spreadsheet for additional photos
     additional_photos_spreadsheet_id: str
     additional_photos_tab_name: str
@@ -334,7 +334,7 @@ def load_settings() -> Settings:
     teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
 
     # AppSheet (Cues)
-    appsheet_base_url = _get_env("APPSHEET_BASE_URL", "https://www.appsheet.com").rstrip("/")
+    appsheet_base_url = _get_env("APPSHEET_BASE_URL", "https://api.appsheet.com").rstrip("/")
     appsheet_app_id = _get_env("APPSHEET_APP_ID", "")
     appsheet_access_key = _get_env("APPSHEET_ACCESS_KEY", "")
     appsheet_cues_table = _get_env("APPSHEET_CUES_TABLE", "")
@@ -343,7 +343,12 @@ def load_settings() -> Settings:
     appsheet_cues_col_cue = _get_env("APPSHEET_CUES_COL_CUE", "Cue")
     appsheet_cues_col_cue_id = _get_env("APPSHEET_CUES_COL_CUE_ID", "Cue ID")
     appsheet_cues_col_id = _get_env("APPSHEET_CUES_COL_ID", "ID")
-    appsheet_cues_col_generated_at = _get_env("APPSHEET_CUES_COL_DATE", "Date")
+
+    # support BOTH names
+    appsheet_cues_col_generated_at = _get_env(
+        "APPSHEET_CUES_COL_GENERATED_AT",
+        _get_env("APPSHEET_CUES_COL_DATE", "Date"),
+    )
 
     power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
 
@@ -414,6 +419,7 @@ def load_settings() -> Settings:
     glide_boughtouts_legacy_id_column = ov["glide_boughtouts_legacy_id_column"]
     glide_boughtouts_project_row_id_column = ov["glide_boughtouts_project_row_id_column"]
     glide_boughtouts_title_column = ov["glide_boughtouts_title_column"]
+    sheets_mapping_path = _get_env("SHEETS_MAPPING_PATH", "packages/contracts/sheets_mapping.yaml")    
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
@@ -490,6 +496,7 @@ def load_settings() -> Settings:
         glide_boughtouts_legacy_id_column=glide_boughtouts_legacy_id_column,
         glide_boughtouts_project_row_id_column=glide_boughtouts_project_row_id_column,
         glide_boughtouts_title_column=glide_boughtouts_title_column,
+        sheets_mapping_path=sheets_mapping_path,
     )
 
 

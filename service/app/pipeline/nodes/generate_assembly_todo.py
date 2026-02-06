@@ -16,7 +16,6 @@ import hashlib
 import secrets
 import string
 
-from ...tools.db_tool import DBTool
 from ...integrations.appsheet_client import AppSheetClient
 
 # -------------------------
@@ -40,7 +39,15 @@ def _load_prompt() -> str:
     path = root / "packages" / "prompts" / "assembly_todo.md"
     return path.read_text(encoding="utf-8")
 
+def _load_prompt_file(name: str) -> str:
+    here = Path(__file__).resolve()
+    root = _find_repo_root(here.parent.parent.parent.parent)
+    path = root / "packages" / "prompts" / name
+    return path.read_text(encoding="utf-8")
 
+
+def _load_zai_cues_prompt() -> str:
+    return _load_prompt_file("zai_cues_10.md")
 # -------------------------
 # Helpers
 # -------------------------
@@ -62,6 +69,20 @@ def _now_timestamp_str() -> str:
 def _payload_hash(payload: dict) -> str:
     b = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(b).hexdigest()
+
+def _slot_cue_id(*, tenant_id: str, legacy_id: str, slot: int) -> str:
+    """
+    Stable slot IDs: always 10 rows per legacy_id.
+    Every trigger updates same 10 rows (no accumulation).
+    """
+    base = f"{tenant_id}|{legacy_id}|ZAI_CUE_SLOT_V1|{int(slot)}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+
+
+def _clamp_10_words(line: str) -> str:
+    w = [x for x in re.split(r"\s+", (line or "").strip()) if x]
+    w = w[:10]
+    return " ".join(w).strip()
 
 def _split_cues(text: str, max_items: int = 10) -> list[str]:
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
@@ -381,6 +402,89 @@ def _clean_chips(text: str, *, stage_label: str) -> str:
         return "\n".join(chips).strip()
     return "\n".join(chips[:3]).strip()
 
+def _parse_json_loose(s: str) -> dict:
+    s = (s or "").strip()
+    if not s:
+        return {}
+    if s.startswith("```"):
+        s = s.strip().strip("`").strip()
+        if s.lower().startswith("json"):
+            s = s[4:].strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        return {}
+
+def _generate_10_cues_from_context(
+    *,
+    llm: LLMTool,
+    company_context: str,
+    snapshot: str,
+    packed_context: str,
+    closure_notes: str,
+    attachment_context: str,
+) -> list[str]:
+    tmpl = _load_zai_cues_prompt()
+    prompt = (
+        tmpl.replace("{company_context}", company_context or "N/A")
+        .replace("{snapshot}", snapshot or "N/A")
+        .replace("{packed_context}", packed_context or "N/A")
+        .replace("{closure_notes}", closure_notes or "N/A")
+        .replace("{attachment_context}", attachment_context or "N/A")
+    )
+    raw = llm.generate_text(prompt)
+    obj = _parse_json_loose(raw)
+    cues = obj.get("cues") or []
+
+    out: list[str] = []
+    seen = set()
+    for c in cues:
+        line = _clamp_10_words(str(c))
+        k = re.sub(r"\s+", " ", line).strip().lower()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(line)
+        if len(out) >= 10:
+            break
+
+    # hard-pad to 10 (keeps AppSheet shape stable)
+    fallback = [
+        "Contact supplier for updates, last time ese hi issues aaye the",
+        "Check for rusty/scratched tools if surface finish is poor",
+        "Critical dimension vernier se confirm kiya",
+        "Packing se pehle final visual scan kar lo",
+    ]
+    i = 0
+    while len(out) < 10 and i < len(fallback):
+        cand = _clamp_10_words(fallback[i])
+        i += 1
+        k = cand.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(cand)
+
+    return out[:10]
+
+
+def _project_chips_from_10(cues10: list[str]) -> str:
+    """
+    Project tab wants 3-4 lines. Use first 3 (or 4 if strong).
+    We keep it deterministic and from same source as AppSheet.
+    """
+    cues10 = [c for c in (cues10 or []) if (c or "").strip()]
+    if not cues10:
+        return ""
+
+    # Prefer 3 lines by default
+    picked = cues10[:3]
+
+    # Add 4th only if it’s clearly distinct and present
+    if len(cues10) >= 4:
+        picked = cues10[:4]
+
+    return "\n".join([_clamp_10_words(x) for x in picked]).strip()
 
 # -------------------------
 # Main node
@@ -570,89 +674,54 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
         packed_context=packed_context,
     )
 
-    # ---- Fill prompt placeholders (NEW prompt) ----
-    prompt_template = _load_prompt()
-    final_prompt = (
-        prompt_template
-        .replace("{{stage}}", stage or "(unknown)")
-        .replace("{{vector_risks}}", vector_risks or "(none found)")
-        .replace("{{process_material}}", process_material or "(unknown)")
-        .replace("{{recent_activity}}", recent_activity or "(unknown)")
-        .replace("{{previous_chips}}", (previous_chips or "").strip())
+    llm = LLMTool(settings)
+
+    # Single source: generate 10 cues from reranked packed context
+    cues10 = _generate_10_cues_from_context(
+        llm=llm,
+        company_context=company_profile_text,
+        snapshot=query_text,                 # project-scoped snapshot
+        packed_context=packed_context,
+        closure_notes="",                    # project node doesn't have closure; keep empty
+        attachment_context="",               # project node doesn't have attachments; keep empty
     )
 
-    llm = LLMTool(settings)
-    raw = llm.generate_text(final_prompt)
-
-    chips = _clean_chips(raw, stage_label=stage)
+    # Project tab uses 3–4 lines derived from SAME cues10
+    chips = _project_chips_from_10(cues10)
 
     # Write back to Project tab (same column)
     col_out = sheets.map.col("project", "ai_critcal_point")
     ok = sheets.update_project_cell_by_legacy_id(legacy_id, column_name=col_out, value=chips)
 
+    state["assembly_todo_written"] = bool(ok)
+    state["assembly_todo_skipped"] = False
+    state["assembly_todo_legacy_id"] = legacy_id
+    state["assembly_todo_chips"] = chips
+    state["assembly_todo_cues10"] = cues10
+
+    if ok:
+        (state.get("logs") or []).append(f"assembly_todo: wrote chips to Project.ai_critcal_point legacy_id={legacy_id}")
+    else:
+        (state.get("logs") or []).append(f"assembly_todo: FAILED writeback to Project.ai_critcal_point legacy_id={legacy_id}")
+
     # -------------------------
-    # NEW: Append cues into AppSheet (idempotent)
+    # Sync the SAME 10 cues into AppSheet (replace/update same 10 slots)
     # -------------------------
     try:
         client = AppSheetClient(settings)
-        if client.enabled() and ok:
-            cue_lines = _split_cues(chips, max_items=10)  # from generated chips (3-4 now, later can grow)
-            if cue_lines:
-                generated_at = _now_timestamp_str()
-
-                # idempotency per (tenant_id, legacy_id, cue_text)
-                db = DBTool(settings.database_url)
-                existing = db.existing_artifact_source_hashes(
-                    tenant_id=tenant_id,
-                    checkin_id=legacy_id,              # reuse field as "project id scope"
-                    artifact_type="APPSHEET_CUE",
-                )
-
-                cue_items: list[dict[str, str]] = []
-                for cue in cue_lines:
-                    payload = {"legacy_id": legacy_id, "cue": cue}
-                    h = _payload_hash(payload)
-                    if h in existing:
-                        continue
-                    cue_items.append({"cue_id": _rand_cue_id(), "cue": cue})
-
-                if cue_items:
-                    client.add_cues_rows(
-                        legacy_id=legacy_id,
-                        cue_items=cue_items,
-                        generated_at=generated_at,
-                    )
-
-                    # record artifacts
-                    run_id = (state.get("run_id") or "").strip()
-                    if run_id:
-                        for cue in cue_items:
-                            h = _payload_hash({"legacy_id": legacy_id, "cue": cue["cue"]})
-                            db.insert_artifact(
-                                run_id=run_id,
-                                artifact_type="APPSHEET_CUE",
-                                url="appsheet_cues",
-                                meta={
-                                    "tenant_id": tenant_id,
-                                    "checkin_id": legacy_id,
-                                    "source_hash": h,
-                                    "legacy_id": legacy_id,
-                                    "cue_id": cue["cue_id"],
-                                },
-                            )
-
-                    (state.get("logs") or []).append(f"appsheet_cues: appended={len(cue_items)} legacy_id={legacy_id}")
-                else:
-                    (state.get("logs") or []).append(f"appsheet_cues: nothing new (idempotency) legacy_id={legacy_id}")
+        if client.enabled() and cues10:
+            generated_at = _now_timestamp_str()
+            cue_items = [
+                {"cue_id": _slot_cue_id(tenant_id=tenant_id, legacy_id=legacy_id, slot=i), "cue": cues10[i - 1]}
+                for i in range(1, 11)
+            ]
+            client.upsert_cues_rows(
+                legacy_id=legacy_id,
+                cue_items=cue_items,
+                generated_at=generated_at,
+            )
+            (state.get("logs") or []).append(f"appsheet_cues: upserted=10 legacy_id={legacy_id}")
     except Exception as e:
         (state.get("logs") or []).append(f"appsheet_cues: non-fatal failure: {e}")
-        
-    state["assembly_todo"] = chips
-    state["assembly_todo_written"] = bool(ok)
-    (state.get("logs") or []).append(
-        f"assembly_todo: chips_mode stage='{stage}' rag(problems={len(problems)} res={len(resolutions)} ccp={len(ccp)} dash={len(dash)})"
-    )
-    (state.get("logs") or []).append(
-        f"assembly_todo: generated and writeback={'ok' if ok else 'failed'} legacy_id={legacy_id}"
-    )
+
     return state
