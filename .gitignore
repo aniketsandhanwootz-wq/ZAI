@@ -47,8 +47,8 @@ service/drive_token.json
 glide_columns.py
 
 glide_tables_preview.txt
-# ignore everything in service/scripts
-service/scripts/
+# ignore scripts contents
+service/scripts/*
 
-# but keep the folder tracked (optional)
+# keep the folder placeholder so Docker COPY works
 !service/scripts/.gitkeep
