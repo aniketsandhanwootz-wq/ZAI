@@ -46,8 +46,11 @@ class AppSheetClient:
         return bool(
             (s.appsheet_app_id or "").strip()
             and (s.appsheet_access_key or "").strip()
-            and (s.appsheet_cues_table or "").strip()
         )
+
+    def enabled_cues(self) -> bool:
+        s = self.settings
+        return self.enabled() and bool((s.appsheet_cues_table or "").strip())
 
     def cues_config(self) -> AppSheetCuesConfig:
         s = self.settings
@@ -68,6 +71,16 @@ class AppSheetClient:
             col_id=(s.appsheet_cues_col_id or "ID").strip(),
             col_generated_at=(s.appsheet_cues_col_generated_at or "Date").strip(),
         )
+
+    def _base_cfg(self) -> tuple[str, str, str]:
+        s = self.settings
+        base = (s.appsheet_base_url or "https://api.appsheet.com").strip().rstrip("/")
+        if "www.appsheet.com" in base:
+            base = "https://api.appsheet.com"
+        app_id = (s.appsheet_app_id or "").strip()
+        key = (s.appsheet_access_key or "").strip()
+        return base, app_id, key
+    
     def _raise_if_appsheet_errors(self, data: Any, *, action: str) -> None:
         """
         AppSheet can return HTTP 200 but still fail row inserts.
@@ -100,7 +113,7 @@ class AppSheetClient:
         timezone: str = "Asia/Kolkata",
         timeout: int = 30,
     ) -> Any:
-        if not self.enabled():
+        if not self.enabled_cues():
             return None
 
         cfg = self.cues_config()
@@ -168,12 +181,13 @@ class AppSheetClient:
         if not self.enabled():
             return None
 
-        cfg = self.cues_config()
-        table_name = (table_name or cfg.table_name).strip()
-        if not table_name:
-            raise RuntimeError("AppSheet table_name missing (APPSHEET_CUES_TABLE)")
+        base_url, app_id, access_key = self._base_cfg()
 
-        url = f"{cfg.base_url}/api/v2/apps/{cfg.app_id}/tables/{quote(table_name)}/Action"
+        table_name = (table_name or "").strip()
+        if not table_name:
+            raise RuntimeError("AppSheet table_name missing")
+
+        url = f"{base_url}/api/v2/apps/{app_id}/tables/{quote(table_name)}/Action"
 
         payload = {
             "Action": (action or "").strip(),
@@ -182,7 +196,7 @@ class AppSheetClient:
         }
 
         headers = {
-            "ApplicationAccessKey": cfg.access_key,
+            "ApplicationAccessKey": access_key,
             "Content-Type": "application/json",
         }
 
@@ -193,7 +207,7 @@ class AppSheetClient:
                 r = self._session.post(url, headers=headers, json=payload, timeout=timeout)
 
                 if not r.ok:
-                    url2 = url + f"?applicationAccessKey={cfg.access_key}"
+                    url2 = url + f"?applicationAccessKey={access_key}"
                     r2 = self._session.post(url2, json=payload, timeout=timeout)
                     if not r2.ok:
                         raise RuntimeError(
@@ -216,6 +230,44 @@ class AppSheetClient:
                 raise
 
         raise RuntimeError(f"AppSheet {action} failed after retries: {last_err}")
+
+    def mark_conversation_critical(
+        self,
+        *,
+        conversation_id: str,
+        critical: bool = True,
+        timeout: int = 30,
+    ) -> Any:
+        """
+        Edit Conversation row (keyed by Conversation ID) and set Critical TRUE/FALSE.
+        This is separate from cues workflow.
+        """
+        if not self.enabled():
+            return None
+
+        s = self.settings
+        table = (s.appsheet_conversation_table or "").strip()
+        key_col = (s.appsheet_conversation_key_col or "Conversation ID").strip()
+        critical_col = (s.appsheet_conversation_critical_col or "Critical").strip()
+
+        if not table:
+            raise RuntimeError("Missing APPSHEET_CONVERSATION_TABLE")
+
+        cid = (conversation_id or "").strip()
+        if not cid:
+            raise RuntimeError("conversation_id missing for mark_conversation_critical")
+
+        row = {
+            key_col: cid,              # must include key column for Edit
+            critical_col: bool(critical),
+        }
+
+        return self.action_rows(
+            table_name=table,
+            action="Edit",
+            rows=[row],
+            timeout=timeout,
+        )
     
     def add_cues_rows(
         self,
@@ -228,7 +280,7 @@ class AppSheetClient:
         """
         cue_items: [{ "cue_id": "...", "cue": "..." }, ...]
         """
-        if not self.enabled():
+        if not self.enabled_cues():
             return None
 
         cfg = self.cues_config()
@@ -267,7 +319,7 @@ class AppSheetClient:
           - If Add fails (most commonly "key already exists"), fallback to Edit
         Assumption: AppSheet table Key column is cfg.col_cue_id ("Cue ID").
         """
-        if not self.enabled():
+        if not self.enabled_cues():
             return None
 
         cfg = self.cues_config()

@@ -235,6 +235,11 @@ class Settings:
     appsheet_access_key: str
     appsheet_cues_table: str
 
+    # AppSheet (Conversation critical trigger)
+    appsheet_conversation_table: str
+    appsheet_conversation_key_col: str
+    appsheet_conversation_critical_col: str
+
     # Optional column overrides (if your table uses different headers)
     appsheet_cues_col_cue: str
     appsheet_cues_col_cue_id: str
@@ -350,6 +355,11 @@ def load_settings() -> Settings:
         _get_env("APPSHEET_CUES_COL_DATE", "Date"),
     )
 
+    # AppSheet (Conversation critical trigger)
+    appsheet_conversation_table = _get_env("APPSHEET_CONVERSATION_TABLE", "Conversation")
+    appsheet_conversation_key_col = _get_env("APPSHEET_CONVERSATION_KEY_COL", "Conversation ID")
+    appsheet_conversation_critical_col = _get_env("APPSHEET_CONVERSATION_CRITICAL_COL", "Critical")
+    # Power Automate (Teams routing flow webhook)
     power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
 
     # Sheets auth
@@ -442,6 +452,9 @@ def load_settings() -> Settings:
         appsheet_cues_col_cue_id=appsheet_cues_col_cue_id,
         appsheet_cues_col_id=appsheet_cues_col_id,
         appsheet_cues_col_generated_at=appsheet_cues_col_generated_at,
+        appsheet_conversation_table=appsheet_conversation_table,
+        appsheet_conversation_key_col=appsheet_conversation_key_col,
+        appsheet_conversation_critical_col=appsheet_conversation_critical_col,
         power_automate_webhook_url=power_automate_webhook_url,
         webhook_secret=webhook_secret,
         llm_provider=llm_provider,

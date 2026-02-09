@@ -29,6 +29,7 @@ OUTPUT FORMAT: You must return VALID JSON ONLY. No markdown, no conversational t
 JSON Schema:
 {
   "technical_advice": "String. Max 60 words. Technical Hinglish.",
+  "is_critical": true,
   "images": [
     {
       "image_index": 0,
@@ -45,6 +46,7 @@ JSON Schema:
 
 HARD RULES:
 - If no defects are clearly visible in an image, return that image with "defects": [] (still include the image_index).
+- Set "is_critical" = true ONLY if it needs immediate human attention (safety risk, scrap risk, major functional/     tolerance risk, customer dispatch impact). Else false.
 - Do not hallucinate tolerances; refer strictly to the Client Context or Checkin Comments.
 - If Status is Update, look for potential future risks too.
 - Output must be raw JSON.

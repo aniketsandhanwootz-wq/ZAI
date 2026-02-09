@@ -3,13 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from ...config import Settings
-from ...tools.sheets_tool import SheetsTool
 from ...integrations.teams_client import TeamsClient
 from ...tools.company_tool import CompanyTool, normalize_company_key, normalize_company_name
 import json
 import hashlib
 from ...tools.db_tool import DBTool
-
+from ...integrations.appsheet_client import AppSheetClient
 
 def _payload_hash(payload: dict) -> str:
     b = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -37,18 +36,52 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     else:
         reply_for_sheet = reply_clean
 
-    sheets = SheetsTool(settings)
-    sheets.append_conversation_ai_comment(
-        checkin_id=checkin_id,
-        remark=reply_for_sheet,
-        status=state.get("checkin_status") or "",
-        photos=photos_cell,
-    )
 
+    # ----------------------------
+    # Conversation writeback (Option A: ALWAYS via AppSheet)
+    # Trigger uses ONLY "Critical"
+    # ----------------------------
+    is_critical = bool(state.get("is_critical"))
+    apps = AppSheetClient(settings)
 
+    conversation_id = (state.get("conversation_id") or "").strip()
+    if not conversation_id:
+        from ...tools.sheets_tool import _rand_conversation_id
+        conversation_id = _rand_conversation_id()
+
+    added_by = "zai@wootz.work"
+    from ...tools.sheets_tool import _now_timestamp_str
+    ts = _now_timestamp_str()
+
+    if not apps.enabled():
+        raise RuntimeError(
+            "AppSheet not enabled (missing APPSHEET_APP_ID / APPSHEET_ACCESS_KEY). "
+            "Conversation writeback requires AppSheet."
+        )
+
+    s = settings
+    table = (s.appsheet_conversation_table or "Conversation").strip()
+    key_col = (s.appsheet_conversation_key_col or "Conversation ID").strip()
+    critical_col = (s.appsheet_conversation_critical_col or "Critical").strip()
+
+    row = {
+        key_col: conversation_id,
+        "CheckIn ID": checkin_id,
+        "Photo": photos_cell,
+        "Remarks": "[ZAI] " + reply_for_sheet,
+        "Status": state.get("checkin_status") or "",
+        "Added by": added_by,
+        "Timestamp": ts,
+
+        # ✅ single bot-trigger flag
+        critical_col: bool(is_critical),
+    }
+
+    apps.action_rows(table_name=table, action="Add", rows=[row], timeout=30)
+
+    state["conversation_id"] = conversation_id
     state["writeback_done"] = True
-    (state.get("logs") or []).append("Wrote back AI comment to Conversation")
-
+    (state.get("logs") or []).append("Wrote Conversation via AppSheet (Critical flag used for bot trigger)")
     # Teams post (only for new checkins)
     if (state.get("event_type") or "") == "CHECKIN_CREATED":
         try:

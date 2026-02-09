@@ -454,10 +454,10 @@ class SheetsTool:
         conversation_id: Optional[str] = None,
         added_by: str = "zai@wootz.work",
         timestamp: Optional[str] = None,
-    ) -> None:
+    ) -> Dict[str, str]:
         """
         Adds a new row into Conversation tab using mapping.writeback.ai_comment
-    
+
         NEW:
           - conversation_id: auto-generated if not provided
           - added_by: defaults to zai@wootz.work
@@ -466,16 +466,16 @@ class SheetsTool:
         wb = self.map.writeback.get("ai_comment", {})
         tab_name = wb.get("tab", self.map.tab("conversation"))
         set_cols = wb.get("set_columns", {})
-    
+
         t = self._table("conversation")
         headers: List[str] = t.get("headers", [])
         idx: Dict[str, int] = t.get("idx", {})
         if not headers:
             raise RuntimeError("Conversation tab has no header row")
-    
+
         prefix = wb.get("remark_prefix", "")
         row: List[Any] = [""] * len(headers)
-    
+
         def set_if_exists(mapped_col_key: str, val: str):
             col_name = set_cols.get(mapped_col_key)
             if not col_name:
@@ -483,12 +483,12 @@ class SheetsTool:
             k = _key(col_name)
             if k in idx:
                 row[idx[k]] = val
-    
-        # ---- NEW defaults ----
+
+        # ---- defaults ----
         cid = (conversation_id or "").strip() or _rand_conversation_id()
         ab = (added_by or "").strip() or "zai@wootz.work"
         ts = (timestamp or "").strip() or _now_timestamp_str()
-    
+
         # ---- Write mapped columns ----
         set_if_exists("conversation_id", cid)
         set_if_exists("checkin_id", str(checkin_id))
@@ -497,10 +497,12 @@ class SheetsTool:
         set_if_exists("status", str(status or ""))
         set_if_exists("added_by", ab)
         set_if_exists("timestamp", ts)
-    
+
         self._append_values(f"{tab_name}!A:ZZ", [row])
         self.refresh_cache("conversation")
 
+        return {"conversation_id": cid}
+    
     def list_additional_photos_for_checkin(self, checkin_id: str, *, tab_name: str) -> List[Dict[str, Any]]:
         """
         Reads a tab like "Checkin Additional photos" that has columns:

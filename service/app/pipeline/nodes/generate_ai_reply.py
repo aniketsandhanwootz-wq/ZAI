@@ -23,6 +23,13 @@ def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
         out = out.replace("{" + k + "}", v or "")
     return out
 
+def _to_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y")
 
 def _normalize_images_defects(raw: Any, image_count: int) -> List[Dict[str, Any]]:
     """
@@ -114,6 +121,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
     if not technical:
         technical = llm.generate_text(prompt).strip()
 
+    state["is_critical"] = _to_bool(out.get("is_critical"))
     state["ai_reply"] = technical
     state["defects_by_image"] = _normalize_images_defects(out.get("images"), len(images))
 
