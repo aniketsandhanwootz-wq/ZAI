@@ -47,8 +47,14 @@ service/drive_token.json
 glide_columns.py
 
 glide_tables_preview.txt
-# ignore scripts contents
-service/scripts/*
 
-# keep the folder placeholder so Docker COPY works
+
+# --- service/scripts: ignore all, allow only reconcile runner ---
+service/scripts/*
+!service/scripts/glide_reconcile.py
+!service/scripts/__init__.py
 !service/scripts/.gitkeep
+
+# still ignore secrets inside scripts explicitly (redundant but safe)
+service/scripts/credentials.json
+service/scripts/drive_token.json
