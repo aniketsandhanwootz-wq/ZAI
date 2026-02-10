@@ -6,7 +6,7 @@ google-api-python-client==2.156.0
 google-auth==2.36.0
 
 # HTTP + utils
-requests==2.32.3
+requests==2.32.4
 pydantic==2.10.3
 python-dotenv==1.0.1
 
