@@ -420,6 +420,7 @@ def ingest_rows(
 
     seen = 0
     ok = 0
+    skipped_unchanged = 0
     skipped_missing_tenant = 0
     skipped_missing_rowid = 0
     errors = 0
@@ -467,6 +468,16 @@ def ingest_rows(
 
             item_id = f"{spec.table_name}:{row_id}".strip()
 
+            # Hard idempotency:
+            # - if row_hash is unchanged, skip embedding + skip writes
+            prev_hash = vec.get_glide_kb_item_row_hash(tenant_id=tenant_id, item_id=item_id)
+            if prev_hash and prev_hash == row_hash:
+                skipped_unchanged += 1
+                continue
+
+            # If changed, we'll do "delete stale NOT IN new_set" after we compute new hashes
+            changed = bool(prev_hash and prev_hash != row_hash)
+
             rag = build_rag_text(
                 entity=spec.entity,
                 title=title,
@@ -492,15 +503,31 @@ def ingest_rows(
             )
 
             chunks = chunk_text(rag, max_chars=900)
+
+            # Build new hash set first (for stale cleanup)
+            new_hashes: list[str] = []
+            norm_chunks: list[tuple[int, str, str]] = []  # (i, ch_norm, content_hash)
+
             for i, ch in enumerate(chunks):
                 ch_norm = _norm_text(ch)
                 if not ch_norm:
                     continue
-
                 content_hash = _sha256(f"{tenant_id}|{item_id}|{i}|{ch_norm}")
+                new_hashes.append(content_hash)
+                norm_chunks.append((i, ch_norm, content_hash))
+
+            # Step 4: delete stale vectors not present anymore (only when row changed)
+            if changed:
+                vec.delete_glide_kb_vectors_not_in_hashes(
+                    tenant_id=tenant_id,
+                    item_id=item_id,
+                    keep_hashes=new_hashes,
+                )
+
+            # Insert missing vectors
+            for i, ch_norm, content_hash in norm_chunks:
                 if vec.glide_kb_vector_hash_exists(tenant_id=tenant_id, item_id=item_id, content_hash=content_hash):
                     continue
-
                 emb = embed.embed_text(ch_norm)
                 vec.insert_glide_kb_vector_if_new(
                     tenant_id=tenant_id,
@@ -531,6 +558,7 @@ def ingest_rows(
         "entity": spec.entity,
         "rows_seen": seen,
         "rows_ok": ok,
+        "skipped_unchanged": skipped_unchanged,
         "rows_error": errors,
         "skipped_missing_rowid": skipped_missing_rowid,
         "skipped_missing_tenant": skipped_missing_tenant,

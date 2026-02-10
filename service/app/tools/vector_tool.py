@@ -76,7 +76,56 @@ class VectorTool:
             cur.execute(sql, (tenant_id, item_id, content_hash))
             return cur.fetchone() is not None
 
+    def get_glide_kb_item_row_hash(self, *, tenant_id: str, item_id: str) -> Optional[str]:
+        sql = """
+        SELECT row_hash
+        FROM glide_kb_items
+        WHERE tenant_id=%s AND item_id=%s
+        LIMIT 1
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, item_id))
+            r = cur.fetchone()
+            return str(r[0]) if r and r[0] else None
 
+
+    def delete_glide_kb_vectors_for_item(self, *, tenant_id: str, item_id: str) -> int:
+        """
+        Deletes ALL vectors for a given KB item. Use when the source row changed,
+        so we don't keep stale vectors.
+        Returns deleted row count (best effort; psycopg2 rowcount may be -1 in some cases).
+        """
+        sql = """
+        DELETE FROM glide_kb_vectors
+        WHERE tenant_id=%s AND item_id=%s
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, item_id))
+            return int(cur.rowcount or 0)
+
+    def delete_glide_kb_vectors_not_in_hashes(
+        self,
+        *,
+        tenant_id: str,
+        item_id: str,
+        keep_hashes: list[str],
+    ) -> int:
+        """
+        Delete stale vectors for (tenant_id,item_id) whose content_hash is NOT in keep_hashes.
+        If keep_hashes is empty, deletes all vectors for that item.
+        """
+        if not keep_hashes:
+            return self.delete_glide_kb_vectors_for_item(tenant_id=tenant_id, item_id=item_id)
+
+        sql = """
+        DELETE FROM glide_kb_vectors
+        WHERE tenant_id=%s AND item_id=%s
+          AND NOT (content_hash = ANY(%s))
+        """
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, item_id, keep_hashes))
+            return int(cur.rowcount or 0)
+        
     def upsert_glide_kb_item(
         self,
         *,
