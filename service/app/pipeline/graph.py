@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List
 from ..config import Settings
 from ..logctx import run_id_var
 from .ingest.run_log import RunLog
-
+from ..tools.langsmith_trace import traceable_wrap, tracing_context
 logger = logging.getLogger("zai.graph")
 
 State = Dict[str, Any]
@@ -187,166 +187,225 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         "logs": [],
     }
 
+    # LangSmith tracing context (no-op unless enabled via env)
+    trace_meta = {
+        "run_id": run_id,
+        "event_type": event_type,
+        "primary_id": primary_id,
+        "idempotency_primary_id": primary_id_scoped,
+        "tenant_hint": tenant_id_hint,
+    }
+
+
     def _timed(name: str, fn: NodeFn) -> State:
         t0 = time.time()
         logger.info("node:start %s", name)
-        out = fn(settings, state)
+
+        traced = traceable_wrap(fn, name=f"zai.node.{name}", run_type="tool")
+        out = traced(settings, state)
+
         dt = (time.time() - t0) * 1000
         logger.info("node:end %s ms=%.1f", name, dt)
         return out
 
     try:
-        if event_type not in _ALLOWED_EVENT_TYPES:
-            msg = f"Skipping pipeline for event_type='{event_type}' (allowed={sorted(_ALLOWED_EVENT_TYPES)})"
-            (state.get("logs") or []).append(msg)
-            logger.info(msg)
-            runlog.success(run_id)
-            return {
-                "run_id": run_id,
-                "ok": True,
-                "skipped": True,
-                "primary_id": primary_id,
-                "event_type": event_type,
-                "logs": state.get("logs"),
-            }
-
-        m = _meta(payload)
-
-        # -------------------------
-        # CCP incremental ingestion
-        # -------------------------
-        if event_type == "CCP_UPDATED":
-            ccp_id = str(payload.get("ccp_id") or "").strip()
-            if not ccp_id:
+        with tracing_context(trace_meta):
+            if event_type not in _ALLOWED_EVENT_TYPES:
+                msg = f"Skipping pipeline for event_type='{event_type}' (allowed={sorted(_ALLOWED_EVENT_TYPES)})"
+                (state.get("logs") or []).append(msg)
+                logger.info(msg)
                 runlog.success(run_id)
-                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing ccp_id", "logs": state.get("logs")}
+                return {
+                    "run_id": run_id,
+                    "ok": True,
+                    "skipped": True,
+                    "primary_id": primary_id,
+                    "event_type": event_type,
+                    "logs": state.get("logs"),
+                }
 
-            from .ingest.ccp_ingest import ingest_ccp_one
+            m = _meta(payload)
 
-            out = ingest_ccp_one(settings, ccp_id=ccp_id)
-            # Also refresh assembly checklist if project is already in MFG
-            try:
-                state["payload"] = payload
-                state = _timed("generate_assembly_todo", generate_assembly_todo)
-            except Exception as _e:
-                (state.get("logs") or []).append(f"assembly_todo: non-fatal after CCP_UPDATED: {_e}")
-            runlog.success(run_id)
-            return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
+            # -------------------------
+            # CCP incremental ingestion
+            # -------------------------
+            if event_type == "CCP_UPDATED":
+                ccp_id = str(payload.get("ccp_id") or "").strip()
+                if not ccp_id:
+                    runlog.success(run_id)
+                    return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing ccp_id", "logs": state.get("logs")}
 
-        # ------------------------------
-        # Dashboard incremental ingestion
-        # ------------------------------
-        if event_type == "DASHBOARD_UPDATED":
-            dashboard_row_id = str(
-                payload.get("dashboard_update_id")
-                or payload.get("dashboard_row_id")
-                or payload.get("row_id")
-                or ""
-            ).strip()
+                from .ingest.ccp_ingest import ingest_ccp_one
 
-            # Prefer Row ID ingestion (correct trigger)
-            if dashboard_row_id:
-                from .ingest.dashboard_ingest import ingest_dashboard_one_by_row_id
+                out = ingest_ccp_one(settings, ccp_id=ccp_id)
+                # Also refresh assembly checklist if project is already in MFG
+                try:
+                    state["payload"] = payload
+                    state = _timed("generate_assembly_todo", generate_assembly_todo)
+                except Exception as _e:
+                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after CCP_UPDATED: {_e}")
+                runlog.success(run_id)
+                return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
 
-                out = ingest_dashboard_one_by_row_id(settings, dashboard_row_id=dashboard_row_id)
+            # ------------------------------
+            # Dashboard incremental ingestion
+            # ------------------------------
+            if event_type == "DASHBOARD_UPDATED":
+                dashboard_row_id = str(
+                    payload.get("dashboard_update_id")
+                    or payload.get("dashboard_row_id")
+                    or payload.get("row_id")
+                    or ""
+                ).strip()
+
+                # Prefer Row ID ingestion (correct trigger)
+                if dashboard_row_id:
+                    from .ingest.dashboard_ingest import ingest_dashboard_one_by_row_id
+
+                    out = ingest_dashboard_one_by_row_id(settings, dashboard_row_id=dashboard_row_id)
+
+                    # Also refresh assembly checklist if project is already in MFG
+                    try:
+                        state["payload"] = payload
+                        state = _timed("generate_assembly_todo", generate_assembly_todo)
+                    except Exception as _e:
+                        (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(row_id): {_e}")
+
+                    runlog.success(run_id)
+                    return {
+                        "run_id": run_id,
+                        "ok": True,
+                        "event_type": event_type,
+                        "dashboard_row_id": dashboard_row_id,
+                        "result": out,
+                        "assembly_todo_written": state.get("assembly_todo_written"),
+                        "logs": state.get("logs"),
+                    }
+
+                # Fallback to legacy_id ingestion (older payloads)
+                legacy_id = str(payload.get("legacy_id") or "").strip()
+                if not legacy_id:
+                    runlog.success(run_id)
+                    return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing dashboard_row_id and legacy_id", "logs": state.get("logs")}
+
+                from .ingest.dashboard_ingest import ingest_dashboard_one
+
+                out = ingest_dashboard_one(settings, legacy_id=legacy_id)
 
                 # Also refresh assembly checklist if project is already in MFG
                 try:
                     state["payload"] = payload
                     state = _timed("generate_assembly_todo", generate_assembly_todo)
                 except Exception as _e:
-                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(row_id): {_e}")
+                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(legacy_id): {_e}")
 
                 runlog.success(run_id)
                 return {
                     "run_id": run_id,
                     "ok": True,
                     "event_type": event_type,
-                    "dashboard_row_id": dashboard_row_id,
+                    "legacy_id": legacy_id,
                     "result": out,
                     "assembly_todo_written": state.get("assembly_todo_written"),
                     "logs": state.get("logs"),
                 }
-
-            # Fallback to legacy_id ingestion (older payloads)
-            legacy_id = str(payload.get("legacy_id") or "").strip()
-            if not legacy_id:
+            # -------------------------
+            # Project status trigger (cron -> mfg)
+            # -------------------------
+            if event_type == "PROJECT_UPDATED":
+                # payload should contain legacy_id (Project.ID)
+                state = _timed("generate_assembly_todo", generate_assembly_todo)
                 runlog.success(run_id)
-                return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing dashboard_row_id and legacy_id", "logs": state.get("logs")}
+                return {
+                    "run_id": run_id,
+                    "ok": True,
+                    "event_type": event_type,
+                    "legacy_id": str(payload.get("legacy_id") or "").strip(),
+                    "assembly_todo_written": state.get("assembly_todo_written"),
+                    "logs": state.get("logs"),
+                }
+            # -------------------------
+            # Checkin / Conversation flow
+            # -------------------------
+            # Reply/writeback ONLY for CHECKIN_CREATED (your requirement)
+            force_reply = _truthy(m.get("force_reply"))
+            ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
+            ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
+            if event_type == "CHECKIN_CREATED" and force_reply:
+                ingest_only = False
 
-            from .ingest.dashboard_ingest import ingest_dashboard_one
+            media_only = _truthy(m.get("media_only"))
 
-            out = ingest_dashboard_one(settings, legacy_id=legacy_id)
+            state = _timed("load_sheet_data", load_sheet_data)
 
-            # Also refresh assembly checklist if project is already in MFG
+            # Always try to refresh assembly checklist after any relevant event.
+            # Node itself will skip unless Project.Status_assembly == 'mfg'.
             try:
-                state["payload"] = payload
                 state = _timed("generate_assembly_todo", generate_assembly_todo)
             except Exception as _e:
-                (state.get("logs") or []).append(f"assembly_todo: non-fatal after DASHBOARD_UPDATED(legacy_id): {_e}")
+                (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
 
-            runlog.success(run_id)
-            return {
-                "run_id": run_id,
-                "ok": True,
-                "event_type": event_type,
-                "legacy_id": legacy_id,
-                "result": out,
-                "assembly_todo_written": state.get("assembly_todo_written"),
-                "logs": state.get("logs"),
-            }
-        # -------------------------
-        # Project status trigger (cron -> mfg)
-        # -------------------------
-        if event_type == "PROJECT_UPDATED":
-            # payload should contain legacy_id (Project.ID)
-            state = _timed("generate_assembly_todo", generate_assembly_todo)
-            runlog.success(run_id)
-            return {
-                "run_id": run_id,
-                "ok": True,
-                "event_type": event_type,
-                "legacy_id": str(payload.get("legacy_id") or "").strip(),
-                "assembly_todo_written": state.get("assembly_todo_written"),
-                "logs": state.get("logs"),
-            }
-        # -------------------------
-        # Checkin / Conversation flow
-        # -------------------------
-        # Reply/writeback ONLY for CHECKIN_CREATED (your requirement)
-        force_reply = _truthy(m.get("force_reply"))
-        ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
-        ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
-        if event_type == "CHECKIN_CREATED" and force_reply:
-            ingest_only = False
+            tenant_id = str(state.get("tenant_id") or "").strip()
+            if tenant_id and tenant_id != tenant_id_hint:
+                runlog.update_tenant(run_id, tenant_id)
 
-        media_only = _truthy(m.get("media_only"))
+            state = _timed("build_thread_snapshot", build_thread_snapshot)
+            state = _timed("analyze_media", analyze_media)
+            # NEW: ingest + analyze "Files" attachments (idempotent)
+            state = _timed("analyze_attachments", analyze_attachments)
 
-        state = _timed("load_sheet_data", load_sheet_data)
+            # ingest-only modes
+            if ingest_only:
+                if media_only:
+                    caps = state.get("image_captions") or []
+                    cap_lines = _clean_lines(caps, max_items=12)
+                    if not cap_lines:
+                        (state.get("logs") or []).append("ingest_only(media_only): no captions found; skipping MEDIA vector")
+                        runlog.success(run_id)
+                        return {
+                            "run_id": run_id,
+                            "ok": True,
+                            "primary_id": primary_id,
+                            "event_type": event_type,
+                            "ingest_only": True,
+                            "media_only": True,
+                            "media_upserted": False,
+                            "logs": state.get("logs"),
+                        }
 
-        # Always try to refresh assembly checklist after any relevant event.
-        # Node itself will skip unless Project.Status_assembly == 'mfg'.
-        try:
-            state = _timed("generate_assembly_todo", generate_assembly_todo)
-        except Exception as _e:
-            (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
+                    from ..tools.embed_tool import EmbedTool
+                    from ..tools.vector_tool import VectorTool
 
-        tenant_id = str(state.get("tenant_id") or "").strip()
-        if tenant_id and tenant_id != tenant_id_hint:
-            runlog.update_tenant(run_id, tenant_id)
+                    checkin_id = str(state.get("checkin_id") or "").strip()
+                    if not tenant_id or not checkin_id:
+                        (state.get("logs") or []).append("ingest_only(media_only): missing tenant/checkin; cannot upsert")
+                        runlog.success(run_id)
+                        return {
+                            "run_id": run_id,
+                            "ok": True,
+                            "primary_id": primary_id,
+                            "event_type": event_type,
+                            "ingest_only": True,
+                            "media_only": True,
+                            "media_upserted": False,
+                            "logs": state.get("logs"),
+                        }
 
-        state = _timed("build_thread_snapshot", build_thread_snapshot)
-        state = _timed("analyze_media", analyze_media)
-        # NEW: ingest + analyze "Files" attachments (idempotent)
-        state = _timed("analyze_attachments", analyze_attachments)
+                    media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
+                    emb = EmbedTool(settings).embed_text(media_text)
+                    VectorTool(settings).upsert_incident_vector(
+                        tenant_id=tenant_id,
+                        checkin_id=checkin_id,
+                        vector_type="MEDIA",
+                        embedding=emb,
+                        project_name=state.get("project_name"),
+                        part_number=state.get("part_number"),
+                        legacy_id=state.get("legacy_id"),
+                        status=state.get("checkin_status") or "",
+                        text=media_text,
+                    )
+                    (state.get("logs") or []).append(f"ingest_only(media_only): upserted MEDIA vector (captions={len(cap_lines)})")
 
-        # ingest-only modes
-        if ingest_only:
-            if media_only:
-                caps = state.get("image_captions") or []
-                cap_lines = _clean_lines(caps, max_items=12)
-                if not cap_lines:
-                    (state.get("logs") or []).append("ingest_only(media_only): no captions found; skipping MEDIA vector")
                     runlog.success(run_id)
                     return {
                         "run_id": run_id,
@@ -355,100 +414,55 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                         "event_type": event_type,
                         "ingest_only": True,
                         "media_only": True,
-                        "media_upserted": False,
+                        "media_upserted": True,
                         "logs": state.get("logs"),
                     }
 
-                from ..tools.embed_tool import EmbedTool
-                from ..tools.vector_tool import VectorTool
-
-                checkin_id = str(state.get("checkin_id") or "").strip()
-                if not tenant_id or not checkin_id:
-                    (state.get("logs") or []).append("ingest_only(media_only): missing tenant/checkin; cannot upsert")
-                    runlog.success(run_id)
-                    return {
-                        "run_id": run_id,
-                        "ok": True,
-                        "primary_id": primary_id,
-                        "event_type": event_type,
-                        "ingest_only": True,
-                        "media_only": True,
-                        "media_upserted": False,
-                        "logs": state.get("logs"),
-                    }
-
-                media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
-                emb = EmbedTool(settings).embed_text(media_text)
-                VectorTool(settings).upsert_incident_vector(
-                    tenant_id=tenant_id,
-                    checkin_id=checkin_id,
-                    vector_type="MEDIA",
-                    embedding=emb,
-                    project_name=state.get("project_name"),
-                    part_number=state.get("part_number"),
-                    legacy_id=state.get("legacy_id"),
-                    status=state.get("checkin_status") or "",
-                    text=media_text,
-                )
-                (state.get("logs") or []).append(f"ingest_only(media_only): upserted MEDIA vector (captions={len(cap_lines)})")
-
+                state = _timed("upsert_vectors", upsert_vectors)
                 runlog.success(run_id)
+                logger.info("SUCCESS(ingest_only) primary_id=%s", primary_id)
                 return {
                     "run_id": run_id,
                     "ok": True,
                     "primary_id": primary_id,
                     "event_type": event_type,
                     "ingest_only": True,
-                    "media_only": True,
-                    "media_upserted": True,
                     "logs": state.get("logs"),
                 }
 
+            # normal pipeline (reply/writeback happens only for CHECKIN_CREATED)
+            if event_type != "CHECKIN_CREATED":
+                # safety: even if caller didn't set ingest_only, we won't reply for other events
+                state = _timed("upsert_vectors", upsert_vectors)
+                runlog.success(run_id)
+                return {
+                    "run_id": run_id,
+                    "ok": True,
+                    "primary_id": primary_id,
+                    "event_type": event_type,
+                    "note": "Non-created event: vectors refreshed, no reply/writeback.",
+                    "logs": state.get("logs"),
+                }
+
+            state = _timed("retrieve_context", retrieve_context)
+            state = _timed("rerank_context", rerank_context)
+            state = _timed("generate_ai_reply", generate_ai_reply)
+            state = _timed("annotate_media", annotate_media)
             state = _timed("upsert_vectors", upsert_vectors)
+            state = _timed("writeback", writeback)
+
             runlog.success(run_id)
-            logger.info("SUCCESS(ingest_only) primary_id=%s", primary_id)
+            logger.info("SUCCESS primary_id=%s", primary_id)
+
             return {
                 "run_id": run_id,
                 "ok": True,
                 "primary_id": primary_id,
                 "event_type": event_type,
-                "ingest_only": True,
+                "ai_reply": state.get("ai_reply"),
+                "writeback_done": state.get("writeback_done"),
                 "logs": state.get("logs"),
             }
-
-        # normal pipeline (reply/writeback happens only for CHECKIN_CREATED)
-        if event_type != "CHECKIN_CREATED":
-            # safety: even if caller didn't set ingest_only, we won't reply for other events
-            state = _timed("upsert_vectors", upsert_vectors)
-            runlog.success(run_id)
-            return {
-                "run_id": run_id,
-                "ok": True,
-                "primary_id": primary_id,
-                "event_type": event_type,
-                "note": "Non-created event: vectors refreshed, no reply/writeback.",
-                "logs": state.get("logs"),
-            }
-
-        state = _timed("retrieve_context", retrieve_context)
-        state = _timed("rerank_context", rerank_context)
-        state = _timed("generate_ai_reply", generate_ai_reply)
-        state = _timed("annotate_media", annotate_media)
-        state = _timed("upsert_vectors", upsert_vectors)
-        state = _timed("writeback", writeback)
-
-        runlog.success(run_id)
-        logger.info("SUCCESS primary_id=%s", primary_id)
-
-        return {
-            "run_id": run_id,
-            "ok": True,
-            "primary_id": primary_id,
-            "event_type": event_type,
-            "ai_reply": state.get("ai_reply"),
-            "writeback_done": state.get("writeback_done"),
-            "logs": state.get("logs"),
-        }
 
     except Exception as e:
         runlog.error(run_id, str(e))

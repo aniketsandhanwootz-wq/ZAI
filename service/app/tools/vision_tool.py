@@ -8,7 +8,7 @@ import os
 import requests
 
 from ..config import Settings  # ✅ allow init from Settings
-
+from .langsmith_trace import traceable_wrap
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """
@@ -159,18 +159,21 @@ class VisionTool:
             "generationConfig": {"temperature": 0.0},
         }
 
-        r = requests.post(url, json=payload, timeout=120)
-        if not r.ok:
-            raise RuntimeError(f"Vision caption failed: {r.status_code} {r.text}")
+        def _call() -> str:
+            r = requests.post(url, json=payload, timeout=120)
+            if not r.ok:
+                raise RuntimeError(f"Vision caption failed: {r.status_code} {r.text}")
 
-        data = r.json()
-        candidates = data.get("candidates", []) or []
-        if not candidates:
-            return ""
+            data = r.json()
+            candidates = data.get("candidates", []) or []
+            if not candidates:
+                return ""
 
-        parts = candidates[0].get("content", {}).get("parts", []) or []
-        text = "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
-        return text
+            parts = candidates[0].get("content", {}).get("parts", []) or []
+            return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
+
+        traced = traceable_wrap(_call, name="vision.caption_for_retrieval", run_type="llm")
+        return traced()
 
     def detect_defects(
         self,

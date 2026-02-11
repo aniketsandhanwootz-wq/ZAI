@@ -5,7 +5,7 @@ from .config import load_settings
 from .pipeline.graph import run_event_graph
 from .logctx import bind_run_id
 from .pipeline.ingest.run_log import RunLog
-
+from .tools.langsmith_trace import traceable_wrap
 from .pipeline.ingest.glide_ingest_raw_material import upsert_glide_raw_material_row
 from .pipeline.ingest.glide_ingest_processes import upsert_glide_process_row
 from .pipeline.ingest.glide_ingest_boughtouts import upsert_glide_boughtouts_row
@@ -25,7 +25,8 @@ def process_event_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload.get("checkin_id"),
         payload.get("conversation_id"),
     )
-    return run_event_graph(settings, payload)
+    traced = traceable_wrap(run_event_graph, name="zai.run_event_graph", run_type="chain")
+    return traced(settings, payload)
 
 
 def _normalize_table_key(k: str) -> str:

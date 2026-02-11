@@ -16,6 +16,17 @@ def _sha256(b: bytes) -> str:
     h.update(b)
     return h.hexdigest()
 
+def _drive_thumbnail_url(file_id: str, *, width: int = 2000) -> str:
+    """
+    AppSheet Image columns often render best with Drive thumbnail endpoint.
+    Requires file to be readable (we set anyone-reader via DriveTool make_public).
+    """
+    fid = (file_id or "").strip()
+    if not fid:
+        return ""
+    # width param format: sz=w2000
+    return f"https://drive.google.com/thumbnail?id={fid}&sz=w{int(width)}"
+
 def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Inputs:
@@ -98,14 +109,24 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
         annot_hash = _sha256(annotated_bytes)
 
-        # Idempotency: if already uploaded, reuse URL
+        # Idempotency: if already uploaded, reuse URL (prefer thumbnail if we have drive_file_id in meta)
         if db and tenant_id and checkin_id and annot_hash in existing_annot_hashes:
-            existing_url = db.get_artifact_url_by_source_hash(
+            existing_url, existing_meta = db.get_artifact_url_and_meta_by_source_hash(
                 tenant_id=tenant_id,
                 checkin_id=checkin_id,
                 artifact_type="ANNOTATED_IMAGE",
                 source_hash=annot_hash,
             )
+
+            drive_file_id = ""
+            if isinstance(existing_meta, dict):
+                drive_file_id = str(existing_meta.get("drive_file_id") or "").strip()
+
+            thumb = _drive_thumbnail_url(drive_file_id) if drive_file_id else ""
+            if thumb:
+                urls.append(thumb)
+                continue
+
             if existing_url:
                 urls.append(existing_url)
                 continue
@@ -124,7 +145,10 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             state.setdefault("logs", []).append(f"annotate_media: upload failed img={idx} (non-fatal): {e}")
             continue
 
-        link = (up.get("webViewLink") or up.get("webContentLink") or "").strip()
+        # Prefer Drive thumbnail URL for AppSheet rendering
+        fid = (up.get("file_id") or "").strip()
+        thumb = _drive_thumbnail_url(fid) if fid else ""
+        link = thumb or (up.get("webContentLink") or up.get("webViewLink") or "").strip()
         if not link:
             continue
 
@@ -144,6 +168,10 @@ def annotate_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "image_index": idx,
                     "file_name": file_name,
                     "mime_type": "image/png",
+
+                    # ✅ store drive file id so future idempotency can always rebuild thumbnail link
+                    "drive_file_id": fid,
+                    "thumbnail_url": thumb,
                 },
             )
             existing_annot_hashes.add(annot_hash)

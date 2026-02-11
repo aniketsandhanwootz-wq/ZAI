@@ -102,6 +102,8 @@ def health(request: Request) -> dict:
         "llm_model": s.llm_model,
         "run_consumer": s.run_consumer,
         "run_migrations": s.run_migrations,
+        "langsmith_tracing": bool(getattr(s, "langsmith_tracing", False)),
+        "langsmith_project": getattr(s, "langsmith_project", ""),
     }
 
 
@@ -110,6 +112,7 @@ def admin_trigger(request: Request, payload: WebhookPayload):
     settings = _get_settings(request)
     result = run_event_graph(settings, payload.model_dump(exclude_none=True))
     return {"ok": True, "result": result}
+
 
 @app.post("/admin/migrate")
 def admin_migrate(request: Request):
