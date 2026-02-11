@@ -163,11 +163,13 @@ def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callabl
     """
     Wrap any function into a LangSmith span, if tracing is enabled.
     Sanitizes args/outputs so runs always finalize (prevents spinner / "running" forever).
+    If tracing is disabled OR langsmith isn't installed, returns original fn.
     """
     if not enabled():
         return fn
 
     try:
+        # Preferred minimal API: decorator
         from langsmith import traceable  # type: ignore
     except Exception:
         return fn
@@ -175,6 +177,7 @@ def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callabl
     def _wrapped(*args: Any, **kwargs: Any) -> T:
         return fn(*args, **kwargs)
 
+    # Give it a readable name in the UI
     try:
         _wrapped.__name__ = name.replace("/", "_").replace(" ", "_").replace(":", "_")
     except Exception:
@@ -191,6 +194,7 @@ def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callabl
     except TypeError:
         # Older versions: no process_inputs/process_outputs
         return traceable(run_type=run_type, name=name)(_wrapped)  # type: ignore[return-value]
+    return traceable(run_type=run_type)(_wrapped)  # type: ignore[return-value]
 
 @contextmanager
 def tracing_context(metadata: Optional[Dict[str, Any]] = None) -> Iterator[None]:
