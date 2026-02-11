@@ -266,6 +266,10 @@ class Settings:
     run_consumer: bool
     consumer_queues: str
 
+    # LangSmith (optional tracing)
+    langsmith_tracing: bool
+    langsmith_project: str
+    langsmith_tags: str
     # Migrations toggle
     run_migrations: bool
 
@@ -328,6 +332,10 @@ def load_settings() -> Settings:
     run_consumer = _get_env("RUN_CONSUMER", "1").lower() in ("1", "true", "yes")
     consumer_queues = _get_env("CONSUMER_QUEUES", "default")
     run_migrations = _get_env("RUN_MIGRATIONS", "0").lower() in ("1", "true", "yes")
+
+    langsmith_tracing = _get_env("LANGSMITH_TRACING", _get_env("LANGCHAIN_TRACING_V2", "0")).lower() in ("1", "true", "yes")
+    langsmith_project = _get_env("LANGCHAIN_PROJECT", _get_env("LANGSMITH_PROJECT", "zai")).strip() or "zai"
+    langsmith_tags = _get_env("LANGSMITH_TAGS", _get_env("LANGCHAIN_TAGS", "")).strip()
 
     google_drive_root_folder_id = _get_env("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
     google_drive_annotated_folder_id = _get_env("GOOGLE_DRIVE_ANNOTATED_FOLDER_ID", "")
@@ -510,6 +518,10 @@ def load_settings() -> Settings:
         glide_boughtouts_project_row_id_column=glide_boughtouts_project_row_id_column,
         glide_boughtouts_title_column=glide_boughtouts_title_column,
         sheets_mapping_path=sheets_mapping_path,
+
+        langsmith_tracing=langsmith_tracing,
+        langsmith_project=langsmith_project,
+        langsmith_tags=langsmith_tags,
     )
 
 

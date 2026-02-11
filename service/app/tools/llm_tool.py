@@ -5,7 +5,7 @@ import base64
 import json
 import os
 from typing import Any, Dict, List
-
+from .langsmith_trace import traceable_wrap, mk_http_meta
 import requests
 
 from ..config import Settings
@@ -67,10 +67,14 @@ class LLMTool:
                 ],
                 "temperature": 0.2,
             }
-            r = requests.post(url, json=payload, headers=headers, timeout=120)
-            r.raise_for_status()
-            data = r.json()
-            return data["choices"][0]["message"]["content"].strip()
+            def _call() -> str:
+                r = requests.post(url, json=payload, headers=headers, timeout=120)
+                r.raise_for_status()
+                data = r.json()
+                return data["choices"][0]["message"]["content"].strip()
+
+            traced = traceable_wrap(_call, name="llm.openai_compat.generate_text", run_type="llm")
+            return traced()
 
         if provider == "gemini":
             base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
@@ -84,16 +88,20 @@ class LLMTool:
                 "generationConfig": {"temperature": 0.2},
             }
 
-            r = requests.post(url, json=payload, timeout=120)
-            if not r.ok:
-                raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
+            def _call() -> str:
+                r = requests.post(url, json=payload, timeout=120)
+                if not r.ok:
+                    raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
 
-            data = r.json()
-            candidates = data.get("candidates", []) or []
-            if not candidates:
-                return ""
-            parts = candidates[0].get("content", {}).get("parts", []) or []
-            return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
+                data = r.json()
+                candidates = data.get("candidates", []) or []
+                if not candidates:
+                    return ""
+                parts = candidates[0].get("content", {}).get("parts", []) or []
+                return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
+
+            traced = traceable_wrap(_call, name="llm.gemini.generate_text", run_type="llm")
+            return traced()
 
         raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
 
@@ -131,15 +139,19 @@ class LLMTool:
             "generationConfig": {"temperature": float(temperature)},
         }
 
-        r = requests.post(url, json=payload, timeout=180)
-        if not r.ok:
-            raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
+        def _call() -> Dict[str, Any]:
+            r = requests.post(url, json=payload, timeout=180)
+            if not r.ok:
+                raise RuntimeError(f"Gemini generateContent failed: {r.status_code} {r.text}")
 
-        data = r.json()
-        candidates = data.get("candidates", []) or []
-        if not candidates:
-            return {}
+            data = r.json()
+            candidates = data.get("candidates", []) or []
+            if not candidates:
+                return {}
 
-        out_parts = candidates[0].get("content", {}).get("parts", []) or []
-        text = "".join([p.get("text", "") for p in out_parts if isinstance(p, dict)]).strip()
-        return _extract_json(text)
+            out_parts = candidates[0].get("content", {}).get("parts", []) or []
+            text = "".join([p.get("text", "") for p in out_parts if isinstance(p, dict)]).strip()
+            return _extract_json(text)
+
+        traced = traceable_wrap(_call, name="llm.gemini.generate_json_with_images", run_type="llm")
+        return traced()
