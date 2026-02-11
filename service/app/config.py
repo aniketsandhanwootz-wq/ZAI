@@ -208,6 +208,9 @@ class Settings:
     database_url: str
     redis_url: str
 
+    # n8n whatsapp integration
+    n8n_whatsapp_webhook_url: str
+
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
@@ -323,6 +326,9 @@ def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
     llm_model = _get_env("LLM_MODEL", "gpt-4o-mini")
+
+    # n8n WhatsApp integration
+    n8n_whatsapp_webhook_url = _get_env("N8N_WHATSAPP_WEBHOOK_URL", "")
 
     embedding_provider = _get_env("EMBEDDING_PROVIDER", "gemini")
     embedding_api_key = _get_env("EMBEDDING_API_KEY", llm_api_key)
@@ -519,6 +525,7 @@ def load_settings() -> Settings:
         glide_boughtouts_title_column=glide_boughtouts_title_column,
         sheets_mapping_path=sheets_mapping_path,
 
+        n8n_whatsapp_webhook_url=n8n_whatsapp_webhook_url,
         langsmith_tracing=langsmith_tracing,
         langsmith_project=langsmith_project,
         langsmith_tags=langsmith_tags,
