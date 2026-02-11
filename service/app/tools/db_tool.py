@@ -109,6 +109,41 @@ class DBTool:
         except Exception:
             return ""
 
+    def get_artifact_url_and_meta_by_source_hash(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        artifact_type: str,
+        source_hash: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        """
+        Returns (url, meta_dict) for latest matching artifact row.
+        Useful so callers can rebuild thumbnail URLs from meta->drive_file_id.
+        """
+        q = """
+        SELECT COALESCE(url,''), COALESCE(meta,'{}'::jsonb)
+        FROM artifacts
+        WHERE artifact_type = %s
+          AND COALESCE(meta->>'tenant_id','') = %s
+          AND COALESCE(meta->>'checkin_id','') = %s
+          AND COALESCE(meta->>'source_hash','') = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(q, (artifact_type, tenant_id, checkin_id, source_hash))
+                    row = cur.fetchone()
+                    if not row:
+                        return "", {}
+                    url = (row[0] or "").strip()
+                    meta = row[1] if isinstance(row[1], dict) else {}
+                    return url, meta
+        except Exception:
+            return "", {}
+        
     def image_captions_by_hash(
         self,
         *,

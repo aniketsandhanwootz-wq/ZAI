@@ -28,13 +28,14 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     # Keep a clean reply for Teams formatting
     reply_clean = reply
 
-    # For sheet writeback, you can keep appending annotated links (works for history)
+    # AppSheet Image column expects a single URL (best: direct image URL)
     photos_cell = ""
     if isinstance(annotated_urls, list) and annotated_urls:
-        photos_cell = "\n".join([str(u).strip() for u in annotated_urls[:3] if str(u).strip()])
+        photos_cell = str(annotated_urls[0]).strip()  # ✅ only 1 for Photo column
         reply_for_sheet = reply_clean + "\n\nAnnotated images:\n" + "\n".join([f"- {u}" for u in annotated_urls[:3]])
     else:
         reply_for_sheet = reply_clean
+
 
 
     # ----------------------------
