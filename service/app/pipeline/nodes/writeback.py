@@ -7,6 +7,7 @@ from ...integrations.teams_client import TeamsClient
 from ...tools.company_tool import CompanyTool, normalize_company_key, normalize_company_name
 import json
 import hashlib
+import requests
 from ...tools.db_tool import DBTool
 from ...integrations.appsheet_client import AppSheetClient
 
@@ -185,5 +186,67 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
         except Exception as e:
             (state.get("logs") or []).append(f"Teams post failed: {e}")
+
+        try: 
+            # n8n WhatsApp Trigger
+            n8n_url = getattr(settings, "n8n_whatsapp_webhook_url", "").strip()
+            if n8n_url:
+                run_id = (state.get("run_id") or "").strip()
+                tenant_row_id = (state.get("tenant_id") or "").strip()
+                print("n8n attacked")
+
+                n8n_payload = {
+                    "type": "checkin_created",
+                    "tenant_id": tenant_row_id,
+                    "checkin_id": checkin_id,
+                    "project_name": state.get("project_name") or "",
+                    "company_name": state.get("company_name") or "",
+                    "ai_reply": reply_clean,
+                    "part_number": state.get("part_number") or "",
+                    "status": state.get("checkin_status") or "",
+                    "checkin_text": state.get("checkin_description") or "",
+                    "created_by": state.get("checkin_created_by") or "",
+                }
+
+                # Idempotency check
+                if run_id:
+                    db = DBTool(settings.database_url)
+                    h = _payload_hash(n8n_payload)
+
+                    existing = db.existing_artifact_source_hashes(
+                        tenant_id=tenant_row_id or "unknown",
+                        checkin_id=checkin_id,
+                        artifact_type="N8N_WEBHOOK",
+                    )
+
+                    if h in existing:
+                        (state.get("logs") or []).append("n8n webhook skipped (idempotency hit)")
+                    else:
+                        response = requests.post(
+                            n8n_url,
+                            json=n8n_payload,
+                            timeout=30
+                        )
+
+                        if response.status_code >= 400:
+                            raise RuntimeError(
+                                f"n8n webhook failed: {response.status_code} {response.text}"
+                            )
+                        
+                        (state.get("logs") or []).append("Posted payload to n8n webhook")
+
+                        # Record artifact
+                        db.insert_artifact(
+                            run_id=run_id,
+                            artifact_type="N8N_WEBHOOK",
+                            url=n8n_url,
+                            meta={
+                                "tenant_id": tenant_row_id or "unknown",
+                                "checkin_id": checkin_id,
+                                "source_hash": h,
+                            },
+                        )
+        except Exception as e:
+            (state.get("logs") or []).append(f"n8n webhook failed: {e}")
 
     return state

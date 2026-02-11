@@ -49,6 +49,7 @@ def load_sheet_mapping() -> SheetMapping:
     override = os.getenv("SHEETS_MAPPING_PATH", "").strip()
     if override:
         path = Path(override).expanduser().resolve()
+        print(path)
     else:
         # service/app/tools -> go up to repo root
         here = Path(__file__).resolve()
