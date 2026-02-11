@@ -3,7 +3,7 @@ import os
 import requests
 
 from ..config import Settings
-
+from .langsmith_trace import traceable_wrap
 
 class EmbedTool:
     """
@@ -44,10 +44,14 @@ class EmbedTool:
             url = f"{base}/v1/embeddings"
             headers = {"Authorization": f"Bearer {self.settings.embedding_api_key}"}
             payload = {"model": self.settings.embedding_model, "input": text}
-            r = requests.post(url, json=payload, headers=headers, timeout=60)
-            r.raise_for_status()
-            data = r.json()
-            emb = data["data"][0]["embedding"]
+            def _call():
+                r = requests.post(url, json=payload, headers=headers, timeout=60)
+                r.raise_for_status()
+                data = r.json()
+                return data["data"][0]["embedding"]
+
+            traced = traceable_wrap(_call, name="embed.openai_compat", run_type="tool")
+            emb = traced()
             self._assert_dims(emb)
             return emb
 
@@ -64,11 +68,15 @@ class EmbedTool:
                 "outputDimensionality": int(self.settings.embedding_dims),
             }
 
-            r = requests.post(url, json=payload, timeout=60)
-            if not r.ok:
-                raise RuntimeError(f"Gemini embedContent failed: {r.status_code} {r.text}")
-            data = r.json()
-            emb = data["embedding"]["values"]
+            def _call():
+                r = requests.post(url, json=payload, timeout=60)
+                if not r.ok:
+                    raise RuntimeError(f"Gemini embedContent failed: {r.status_code} {r.text}")
+                data = r.json()
+                return data["embedding"]["values"]
+
+            traced = traceable_wrap(_call, name=f"embed.gemini.{task_type}", run_type="tool")
+            emb = traced()
             self._assert_dims(emb)
             return emb
 
