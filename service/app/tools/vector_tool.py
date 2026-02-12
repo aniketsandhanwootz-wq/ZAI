@@ -532,15 +532,15 @@ class VectorTool:
             args.append(vector_type)
 
         if project_name:
-            where.append("project_name=%s")
+            where.append("(project_name=%s OR project_name IS NULL OR project_name='')")
             args.append(project_name)
 
         if part_number:
-            where.append("part_number=%s")
+            where.append("(part_number=%s OR part_number IS NULL OR part_number='')")
             args.append(part_number)
 
         if legacy_id:
-            where.append("legacy_id=%s")
+            where.append("(legacy_id=%s OR legacy_id IS NULL OR legacy_id='')")
             args.append(legacy_id)
 
         sql = f"""
