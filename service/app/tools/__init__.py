@@ -1,10 +1,14 @@
 # service/app/tools/__init__.py
-from __future__ import annotations
-
 from .langchain_tools import (
-    build_langchain_tools,          # returns dict[name] -> StructuredTool
-    get_tool_registry,              # cached ToolRegistry
-    ToolRegistry,                   # typed registry wrapper
+    ToolRegistry,
+    get_tool_registry,
+    list_tool_names,
+    validate_required_tools,
 )
 
-__all__ = ["build_langchain_tools", "get_tool_registry", "ToolRegistry"]
+__all__ = [
+    "ToolRegistry",
+    "get_tool_registry",
+    "list_tool_names",
+    "validate_required_tools",
+]

@@ -10,12 +10,19 @@ import hashlib
 import string
 
 from ...config import Settings
-from ...tools.sheets_tool import _key, _norm_value
 from .rerank_context import rerank_context
 
 from ..lc_runtime import lc_registry, lc_invoke
 
+def _norm_value(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x.strip()
+    return str(x).strip()
 
+def _key(s: Any) -> str:
+    return re.sub(r"\s+", " ", _norm_value(s)).strip().lower()
 # -------------------------
 # Prompt loader (ONLY zai_cues_10.md)
 # -------------------------

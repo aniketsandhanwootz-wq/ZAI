@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from pathlib import Path
 
 from ...config import Settings
-from ..lc_runtime import lc_tools, lc_invoke
+from ..lc_runtime import lc_registry, lc_invoke
 import base64
 
 
@@ -62,7 +62,7 @@ def _b64(b: bytes) -> str:
 
 
 def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
-    tools = lc_tools(settings, state)
+    reg = lc_registry(settings, state)
 
     tenant_id = (state.get("tenant_id") or "").strip()
     snapshot = (state.get("thread_snapshot_text") or "").strip()
@@ -127,7 +127,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         )
 
     out = lc_invoke(
-        tools,
+        reg,
         "llm_generate_json_with_images",
         {"prompt": prompt, "images": tool_images, "temperature": 0.0},
         state,
@@ -136,14 +136,14 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
 
     if not isinstance(out, dict):
         # fallback to text
-        txt = lc_invoke(tools, "llm_generate_text", {"prompt": prompt}, state, fatal=True)
+        txt = lc_invoke(reg, "llm_generate_text", {"prompt": prompt}, state, fatal=True)
         state["ai_reply"] = str(txt or "").strip()
         state["defects_by_image"] = []
         return state
 
     technical = (out.get("technical_advice") or "").strip()
     if not technical:
-        txt = lc_invoke(tools, "llm_generate_text", {"prompt": prompt}, state, fatal=True)
+        txt = lc_invoke(reg, "llm_generate_text", {"prompt": prompt}, state, fatal=True)
         technical = str(txt or "").strip()
 
     state["is_critical"] = _to_bool(out.get("is_critical"))

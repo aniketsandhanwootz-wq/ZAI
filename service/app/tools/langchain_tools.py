@@ -29,7 +29,8 @@ from .company_tool import CompanyTool
 from ..integrations.appsheet_client import AppSheetClient
 from ..integrations.teams_client import TeamsClient
 
-
+from .file_extractors.router import extract_any, sniff_mime, sha256_text, sha256_bytes
+import requests
 # --------------------------
 # Shared envelopes / helpers
 # --------------------------
@@ -147,22 +148,30 @@ _REGISTRY_CACHE: Dict[str, ToolRegistry] = {}
 
 def _settings_cache_key(settings: Settings) -> str:
     """
-    Settings objects (pydantic/BaseSettings) are typically unhashable, so lru_cache(settings)
-    will crash. Use a stable string key derived from fields that affect tool behavior.
-    Keep this conservative: if any of these change, tools should rebuild.
+    Settings objects are unhashable; derive a stable key from fields that affect tool behavior.
+    IMPORTANT: must match actual Settings field names.
     """
     parts = [
         f"db={getattr(settings, 'database_url', '')}",
-        f"sheet={getattr(settings, 'google_sheet_id', '')}",
+        f"redis={getattr(settings, 'redis_url', '')}",
+        f"sheet={getattr(settings, 'spreadsheet_id', '')}",
+
         f"llm_provider={getattr(settings, 'llm_provider', '')}",
         f"llm_model={getattr(settings, 'llm_model', '')}",
+
         f"embed_provider={getattr(settings, 'embedding_provider', '')}",
         f"embed_model={getattr(settings, 'embedding_model', '')}",
+        f"embed_dims={getattr(settings, 'embedding_dims', '')}",
+
         f"vision_provider={getattr(settings, 'vision_provider', '')}",
         f"vision_model={getattr(settings, 'vision_model', '')}",
-        f"drive_root={getattr(settings, 'drive_root_folder_id', '')}",
+
+        f"drive_root={getattr(settings, 'google_drive_root_folder_id', '')}",
+        f"drive_annotated={getattr(settings, 'google_drive_annotated_folder_id', '')}",
+
         f"appsheet_app={getattr(settings, 'appsheet_app_id', '')}",
         f"teams_webhook={getattr(settings, 'power_automate_webhook_url', '') or getattr(settings, 'teams_webhook_url', '')}",
+        f"glide_app={getattr(settings, 'glide_app_id', '')}",
     ]
     return "|".join(parts)
 
@@ -1043,7 +1052,131 @@ def build_teams_tools(settings: Settings) -> List[StructuredTool]:
         StructuredTool.from_function(name="teams_post_message", description="Post a Teams/PowerAutomate webhook payload.", args_schema=TeamsPostMessageIn, func=post_message),
     ]
 
+# --------------------------
+# File extractor wrappers (router)
+# --------------------------
 
+class FileSha256TextIn(BaseModel):
+    text: str
+
+class FileSha256BytesIn(BaseModel):
+    content_b64: str
+
+class FileSniffMimeIn(BaseModel):
+    filename: str = ""
+    declared_mime: str = ""
+    content_b64: str
+
+class FileExtractAnyIn(BaseModel):
+    filename: str = ""
+    mime_type: str = ""
+    content_b64: str
+    context_hint: str = ""
+    enable_vision_caption: bool = True
+
+def build_file_tools(settings: Settings) -> List[StructuredTool]:
+    vis = VisionTool(settings)
+
+    def sha_text(inp: FileSha256TextIn) -> Dict[str, Any]:
+        return _safe_call(lambda: sha256_text(inp.text or ""), code="FILE_ERROR", name="file.sha256_text")
+
+    def sha_bytes(inp: FileSha256BytesIn) -> Dict[str, Any]:
+        def _do():
+            b = _b64_decode(inp.content_b64 or "")
+            return sha256_bytes(b)
+        return _safe_call(_do, code="FILE_ERROR", name="file.sha256_bytes")
+
+    def sniff(inp: FileSniffMimeIn) -> Dict[str, Any]:
+        def _do():
+            b = _b64_decode(inp.content_b64 or "")
+            return sniff_mime(inp.filename or "", inp.declared_mime or "", b)
+        return _safe_call(_do, code="FILE_ERROR", name="file.sniff_mime")
+
+    def extract(inp: FileExtractAnyIn) -> Dict[str, Any]:
+        def _vision_caption(image_bytes: bytes, mime_type: str, context: str = "") -> str:
+            if not inp.enable_vision_caption:
+                return ""
+            return vis.caption_for_retrieval(
+                image_bytes=image_bytes,
+                mime_type=mime_type or "image/jpeg",
+                context_hint=(context or inp.context_hint or ""),
+                model=None,
+            )
+
+        def _do():
+            b = _b64_decode(inp.content_b64 or "")
+            ex = extract_any(
+                filename=inp.filename or "",
+                mime_type=inp.mime_type or "",
+                data=b,
+                vision_caption_fn=_vision_caption,
+            )
+            return {
+                "doc_type": ex.doc_type,
+                "extracted_text": (ex.extracted_text or ""),
+                "extracted_json": (ex.extracted_json or {}),
+                "meta": (ex.meta or {}),
+            }
+        return _safe_call(_do, code="FILE_ERROR", name="file.extract_any")
+
+    return [
+        StructuredTool.from_function(
+            name="file_sha256_text",
+            description="SHA256 of a text string.",
+            args_schema=FileSha256TextIn,
+            func=sha_text,
+        ),
+        StructuredTool.from_function(
+            name="file_sha256_bytes",
+            description="SHA256 of bytes (base64 content).",
+            args_schema=FileSha256BytesIn,
+            func=sha_bytes,
+        ),
+        StructuredTool.from_function(
+            name="file_sniff_mime",
+            description="Sniff mime from filename/declared mime and file bytes (base64).",
+            args_schema=FileSniffMimeIn,
+            func=sniff,
+        ),
+        StructuredTool.from_function(
+            name="file_extract_any",
+            description="Extract text/json from a file (base64). Can use vision caption for images.",
+            args_schema=FileExtractAnyIn,
+            func=extract,
+        ),
+    ]
+
+
+# --------------------------
+# Simple HTTP wrappers (for webhooks)
+# --------------------------
+
+class HttpPostJsonIn(BaseModel):
+    url: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    timeout: int = 30
+
+def build_http_tools(_: Settings) -> List[StructuredTool]:
+    def post_json(inp: HttpPostJsonIn) -> Dict[str, Any]:
+        def _do():
+            url = (inp.url or "").strip()
+            if not url:
+                raise ValueError("Missing url")
+            resp = requests.post(url, json=inp.payload or {}, timeout=int(inp.timeout or 30))
+            body = (resp.text or "")
+            if len(body) > 2000:
+                body = body[:2000] + "\n...[TRUNCATED]"
+            return {"status_code": int(resp.status_code), "text": body}
+        return _safe_call(_do, code="HTTP_ERROR", name="http.post_json")
+
+    return [
+        StructuredTool.from_function(
+            name="http_post_json",
+            description="HTTP POST JSON to a webhook endpoint. Returns status_code and response text (truncated).",
+            args_schema=HttpPostJsonIn,
+            func=post_json,
+        )
+    ]
 # --------------------------
 # Toolkit builder (stable API)
 # --------------------------
@@ -1070,4 +1203,6 @@ def build_langchain_tools(settings: Settings) -> Dict[str, StructuredTool]:
     tools += build_company_tools(settings)
     tools += build_appsheet_tools(settings)
     tools += build_teams_tools(settings)
+    tools += build_file_tools(settings)
+    tools += build_http_tools(settings)
     return {t.name: t for t in tools}

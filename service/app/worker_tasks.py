@@ -1,22 +1,71 @@
-from typing import Any, Dict, List
+# service/app/worker_tasks.py
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 import logging
 
-from .config import load_settings
+import redis
+from rq import Queue
+
+from .config import load_settings, Settings
 from .pipeline.graph import run_event_graph
 from .logctx import bind_run_id
 from .pipeline.ingest.run_log import RunLog
 from .tools.langsmith_trace import traceable_wrap
+
 from .pipeline.ingest.glide_ingest_raw_material import upsert_glide_raw_material_row
 from .pipeline.ingest.glide_ingest_processes import upsert_glide_process_row
 from .pipeline.ingest.glide_ingest_boughtouts import upsert_glide_boughtouts_row
 from .pipeline.ingest.glide_ingest_project import upsert_glide_project_row  # may be no-op if project table not configured
 from .pipeline.ingest.glide_ingest_company import upsert_glide_company_row
+
 logger = logging.getLogger("zai.worker")
 
 
+# --------------------------
+# RQ enqueue helpers (B entrypoints)
+# --------------------------
+
+def _rq_queue(settings: Settings, queue_name: str) -> Queue:
+    qn = (queue_name or "").strip() or "default"
+    r = redis.from_url(settings.redis_url)
+    return Queue(name=qn, connection=r)
+
+
+def enqueue_event_task(payload: Dict[str, Any], *, queue_name: str = "default", job_timeout: int = 900) -> Dict[str, Any]:
+    """
+    Enqueue the main event graph task to RQ.
+    Returns: {ok, job_id, queue, event_type, primary_id_hint}
+    """
+    settings = load_settings()
+    q = _rq_queue(settings, queue_name)
+    job = q.enqueue("service.app.worker_tasks.process_event_task", payload, job_timeout=job_timeout)
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "queue": q.name,
+        "event_type": payload.get("event_type"),
+        "primary_id_hint": payload.get("checkin_id") or payload.get("conversation_id") or payload.get("legacy_id") or payload.get("row_id"),
+    }
+
+
+def enqueue_glide_webhook_task(payload: Dict[str, Any], *, queue_name: str = "default", job_timeout: int = 900) -> Dict[str, Any]:
+    """
+    Enqueue the Glide incremental upsert task to RQ.
+    """
+    settings = load_settings()
+    q = _rq_queue(settings, queue_name)
+    job = q.enqueue("service.app.worker_tasks.process_glide_webhook_task", payload, job_timeout=job_timeout)
+    return {"ok": True, "job_id": job.id, "queue": q.name}
+
+
+# --------------------------
+# Worker-executed tasks
+# --------------------------
+
 def process_event_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Existing: executed by RQ worker for main event graph.
+    Executed by RQ worker for main event graph.
     """
     settings = load_settings()
     logger.info(
@@ -54,7 +103,7 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     Executed by RQ worker: incremental upsert for Glide rows.
     Payload:
       {
-        "table_key": "raw_material" | "processes" | "boughtouts" | "project",
+        "table_key": "raw_material" | "processes" | "boughtouts" | "project" | "company",
         "row_ids": ["..."],
         "event": "updated" | "created" | ...
       }
@@ -90,15 +139,12 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
                 elif table_key == "boughtouts":
                     out = upsert_glide_boughtouts_row(settings, row_id=rid)
                 elif table_key == "project":
-                    # if GLIDE_PROJECT_TABLE not configured, your code already "skips" in full scan.
                     out = upsert_glide_project_row(settings, row_id=rid)
                 elif table_key == "company":
                     out = upsert_glide_company_row(settings, row_id=rid)
                 else:
                     raise RuntimeError(f"Unknown table_key='{table_key}' (expected raw_material/processes/boughtouts/project/company)")
 
-                # best-effort: infer tenant_id from result if present
-                # (your ingest_rows returns ok + counts; not tenant. that's fine)
                 runlog.success(run_id)
                 ok += 1
                 results.append({"row_id": rid, "ok": True, "result": out})
@@ -113,5 +159,5 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "rows": len(row_ids),
         "rows_ok": ok,
         "rows_error": err,
-        "results": results[:50],  # limit payload size
+        "results": results[:50],
     }

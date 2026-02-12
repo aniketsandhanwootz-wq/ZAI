@@ -6,9 +6,9 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Request, HTTPException
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from ..config import Settings
-from ..queue import enqueue_glide_job
 
 logger = logging.getLogger("zai.glide_webhook")
 
@@ -29,7 +29,7 @@ def _require_secret(request: Request, settings: Settings) -> None:
       - Header: x-webhook-secret
       - Header: authorization: Bearer <secret>
       - Query: ?secret=<secret>
-    Reuse WEBHOOK_SECRET for now (same as Apps Script), so you don't add new env.
+    Reuse WEBHOOK_SECRET.
     """
     expected = (settings.webhook_secret or "").strip()
     if not expected:
@@ -49,11 +49,21 @@ def _require_secret(request: Request, settings: Settings) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized (bad secret)")
 
 
+def _truthy(v: Optional[str]) -> bool:
+    s = str(v or "").strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
+def _default_queue(settings: Settings) -> str:
+    q = (settings.consumer_queues or "default").split(",")[0].strip()
+    return q or "default"
+
+
 def _as_list(x: Any) -> List[str]:
     if x is None:
         return []
     if isinstance(x, list):
-        out = []
+        out: List[str] = []
         for v in x:
             s = str(v or "").strip()
             if s:
@@ -64,7 +74,6 @@ def _as_list(x: Any) -> List[str]:
 
 
 def _pick_table_key(body: Dict[str, Any]) -> str:
-    # keep aliases, Glide payload can vary
     for k in ("table_key", "table", "entity", "kb_table", "type"):
         v = str(body.get(k) or "").strip()
         if v:
@@ -73,7 +82,6 @@ def _pick_table_key(body: Dict[str, Any]) -> str:
 
 
 def _pick_row_ids(body: Dict[str, Any]) -> List[str]:
-    # allow single or bulk
     for k in ("row_ids", "rowIds", "row_id", "rowId", "id", "$rowID"):
         if k in body:
             ids = _as_list(body.get(k))
@@ -83,9 +91,7 @@ def _pick_row_ids(body: Dict[str, Any]) -> List[str]:
 
 
 def _normalize_table_key(k: str) -> str:
-    k = (k or "").strip().lower()
-    k = k.replace(" ", "_").replace("-", "_")
-    # common aliases
+    k = (k or "").strip().lower().replace(" ", "_").replace("-", "_")
     alias = {
         "rawmaterial": "raw_material",
         "raw_materials": "raw_material",
@@ -105,7 +111,11 @@ def _normalize_table_key(k: str) -> str:
 
 
 @router.post("/glide")
-async def glide_webhook(request: Request) -> Dict[str, Any]:
+async def glide_webhook(
+    request: Request,
+    sync: Optional[str] = None,   # ?sync=1 debug
+    queue: Optional[str] = None,  # ?queue=high override
+) -> Dict[str, Any]:
     settings = _get_settings(request)
     _require_secret(request, settings)
 
@@ -125,11 +135,10 @@ async def glide_webhook(request: Request) -> Dict[str, Any]:
     if not row_ids:
         raise HTTPException(status_code=400, detail="Missing row_id/row_ids in payload")
 
-    # optional metadata passthrough
     meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
     event = str(body.get("event") or body.get("action") or body.get("trigger") or "").strip() or "updated"
 
-    payload = {
+    task_payload = {
         "source": "glide_webhook",
         "table_key": table_key,
         "row_ids": row_ids,
@@ -137,7 +146,23 @@ async def glide_webhook(request: Request) -> Dict[str, Any]:
         "meta": meta,
     }
 
-    job_id = enqueue_glide_job(settings, payload)
+    # Debug/local: run inline
+    if _truthy(sync):
+        from ..worker_tasks import process_glide_webhook_task
 
-    logger.info("enqueued glide ingest job=%s table=%s rows=%s event=%s", job_id, table_key, len(row_ids), event)
-    return {"ok": True, "enqueued": True, "job_id": job_id, "table_key": table_key, "row_ids": row_ids, "event": event}
+        result = process_glide_webhook_task(task_payload)
+        return {"ok": True, "enqueued": False, "result": result, "table_key": table_key, "row_ids": row_ids}
+
+    # Production: enqueue
+    qname = (queue or "").strip() or _default_queue(settings)
+
+    try:
+        from ..worker_tasks import enqueue_glide_webhook_task
+
+        job = enqueue_glide_webhook_task(task_payload, queue_name=qname)
+        logger.info("enqueued glide ingest job=%s table=%s rows=%s event=%s queue=%s", job.get("job_id"), table_key, len(row_ids), event, qname)
+        return {"ok": True, "enqueued": True, "queue": qname, "job": job, "table_key": table_key, "row_ids": row_ids, "event": event}
+    except RedisConnectionError as e:
+        raise HTTPException(status_code=503, detail=f"Queue unavailable: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue: {e}")

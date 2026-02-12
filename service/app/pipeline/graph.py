@@ -32,7 +32,7 @@ def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
     )
 
 
-# Checkin pipeline nodes (existing)
+# ---- Node function resolution (your existing nodes, unchanged) ----
 load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
@@ -115,10 +115,12 @@ def _primary_id_for_event(payload: Dict[str, Any], event_type: str) -> str:
 
 def _scoped_primary_id_for_run(payload: Dict[str, Any], *, primary_id: str) -> str:
     """
-    Make idempotency key include "mode" so backfills don't collide with earlier runs.
+    Checkpointing decision:
+      - We do NOT use LangGraph checkpointing in MVP.
+      - We rely on RunLog idempotency keys + RQ retry semantics.
+    This scope avoids collisions between normal runs vs backfill modes.
     """
     m = _meta(payload)
-
     ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply"))
     media_only = _truthy(m.get("media_only"))
 
@@ -160,7 +162,7 @@ def _assembly_todo_nonfatal(settings: Settings, state: State) -> State:
 def _route_after_analyzers(state: State) -> str:
     """
     Decide the next step after:
-      load_sheet_data -> build_thread_snapshot -> analyze_media -> analyze_attachments
+      load_sheet_data -> generate_assembly_todo -> build_thread_snapshot -> analyze_media -> analyze_attachments
     """
     payload = state.get("payload") or {}
     m = _meta(payload)
@@ -172,90 +174,58 @@ def _route_after_analyzers(state: State) -> str:
     if event_type == "CHECKIN_CREATED" and force_reply:
         ingest_only = False
 
-    # Ingest-only OR non-created events never do reply/writeback
     if ingest_only or event_type != "CHECKIN_CREATED":
         return "upsert_vectors"
 
     return "retrieve_context"
 
 
+def _route_after_upsert(state: State) -> str:
+    payload = state.get("payload") or {}
+    event_type = str(state.get("event_type") or payload.get("event_type") or "").strip()
+    m = _meta(payload)
+
+    force_reply = _truthy(m.get("force_reply"))
+    ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
+    ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
+    if event_type == "CHECKIN_CREATED" and force_reply:
+        ingest_only = False
+
+    if ingest_only or event_type != "CHECKIN_CREATED":
+        return "END"
+    return "writeback"
+
+
 @lru_cache(maxsize=1)
 def _build_langgraph_app() -> Any:
     """
-    Build and compile the LangGraph once per process.
-    Nodes still execute your existing functions; only orchestration changes.
+    Build/compile once per process.
+    Dispatch layer calls bound node closures stored in state["__lg_bound_nodes__"].
     """
+    def _dispatch(node_name: str) -> Callable[[State], State]:
+        def _f(s: State) -> State:
+            bound = s.get("__lg_bound_nodes__") or {}
+            fn = bound.get(node_name)
+            if not callable(fn):
+                _ensure_logs(s).append(f"LangGraph dispatch missing node '{node_name}'")
+                return s
+            return fn(s)
+        return _f
+
     g: StateGraph = StateGraph(dict)
 
-    # Nodes (wrappers because LangGraph node signature is state-only)
-    def n_load(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "load_sheet_data", load_sheet_data)
-        return _n
-
-    def n_assembly(settings: Settings):
-        def _n(state: State) -> State:
-            return _assembly_todo_nonfatal(settings, state)
-        return _n
-
-    def n_snapshot(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "build_thread_snapshot", build_thread_snapshot)
-        return _n
-
-    def n_media(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "analyze_media", analyze_media)
-        return _n
-
-    def n_files(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "analyze_attachments", analyze_attachments)
-        return _n
-
-    def n_upsert(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "upsert_vectors", upsert_vectors)
-        return _n
-
-    def n_retrieve(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "retrieve_context", retrieve_context)
-        return _n
-
-    def n_rerank(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "rerank_context", rerank_context)
-        return _n
-
-    def n_reply(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "generate_ai_reply", generate_ai_reply)
-        return _n
-
-    def n_annotate(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "annotate_media", annotate_media)
-        return _n
-
-    def n_writeback(settings: Settings):
-        def _n(state: State) -> State:
-            return _timed_node(settings, state, "writeback", writeback)
-        return _n
-
-    # We compile with placeholders; actual closures are bound at runtime in run_event_graph().
-    # So we add "keys" only; actual callables are set later via g.add_node(...).
-    g.add_node("load_sheet_data", lambda s: s)
-    g.add_node("generate_assembly_todo", lambda s: s)
-    g.add_node("build_thread_snapshot", lambda s: s)
-    g.add_node("analyze_media", lambda s: s)
-    g.add_node("analyze_attachments", lambda s: s)
-    g.add_node("upsert_vectors", lambda s: s)
-    g.add_node("retrieve_context", lambda s: s)
-    g.add_node("rerank_context", lambda s: s)
-    g.add_node("generate_ai_reply", lambda s: s)
-    g.add_node("annotate_media", lambda s: s)
-    g.add_node("writeback", lambda s: s)
+    # Nodes are dispatch wrappers
+    g.add_node("load_sheet_data", _dispatch("load_sheet_data"))
+    g.add_node("generate_assembly_todo", _dispatch("generate_assembly_todo"))
+    g.add_node("build_thread_snapshot", _dispatch("build_thread_snapshot"))
+    g.add_node("analyze_media", _dispatch("analyze_media"))
+    g.add_node("analyze_attachments", _dispatch("analyze_attachments"))
+    g.add_node("upsert_vectors", _dispatch("upsert_vectors"))
+    g.add_node("retrieve_context", _dispatch("retrieve_context"))
+    g.add_node("rerank_context", _dispatch("rerank_context"))
+    g.add_node("generate_ai_reply", _dispatch("generate_ai_reply"))
+    g.add_node("annotate_media", _dispatch("annotate_media"))
+    g.add_node("writeback", _dispatch("writeback"))
 
     # Edges
     g.set_entry_point("load_sheet_data")
@@ -264,63 +234,53 @@ def _build_langgraph_app() -> Any:
     g.add_edge("build_thread_snapshot", "analyze_media")
     g.add_edge("analyze_media", "analyze_attachments")
 
-    # Conditional route
     g.add_conditional_edges(
         "analyze_attachments",
         _route_after_analyzers,
-        {
-            "upsert_vectors": "upsert_vectors",
-            "retrieve_context": "retrieve_context",
-        },
+        {"upsert_vectors": "upsert_vectors", "retrieve_context": "retrieve_context"},
     )
 
-    # Reply path
     g.add_edge("retrieve_context", "rerank_context")
     g.add_edge("rerank_context", "generate_ai_reply")
     g.add_edge("generate_ai_reply", "annotate_media")
     g.add_edge("annotate_media", "upsert_vectors")
-    g.add_edge("upsert_vectors", "writeback")
-    g.add_edge("writeback", END)
-
-    # Non-reply path ends after upsert_vectors
-    # We keep "writeback" as sink for reply path only; for ingest-only/non-created we short-circuit via END:
-    # Implement by conditionally setting "writeback" to a no-op and then routing; but simplest is to set
-    # upsert_vectors -> END for those cases by overriding the graph at runtime:
-    # We do it by adding an extra conditional after upsert_vectors.
-    def _route_after_upsert(state: State) -> str:
-        payload = state.get("payload") or {}
-        event_type = str(state.get("event_type") or payload.get("event_type") or "").strip()
-        m = _meta(payload)
-        ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
-        ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
-        if ingest_only or event_type != "CHECKIN_CREATED":
-            return "END"
-        return "writeback"
 
     g.add_conditional_edges(
         "upsert_vectors",
         _route_after_upsert,
-        {
-            "END": END,
-            "writeback": "writeback",
-        },
+        {"END": END, "writeback": "writeback"},
     )
+    g.add_edge("writeback", END)
 
-    compiled = g.compile()
+    return g.compile()
 
-    # Return both compiled graph and node factory functions for runtime binding
-    return compiled, {
-        "load_sheet_data": n_load,
-        "generate_assembly_todo": n_assembly,
-        "build_thread_snapshot": n_snapshot,
-        "analyze_media": n_media,
-        "analyze_attachments": n_files,
-        "upsert_vectors": n_upsert,
-        "retrieve_context": n_retrieve,
-        "rerank_context": n_rerank,
-        "generate_ai_reply": n_reply,
-        "annotate_media": n_annotate,
-        "writeback": n_writeback,
+
+def _bind_nodes(settings: Settings) -> Dict[str, Callable[[State], State]]:
+    """
+    Bind Settings once per invocation. Each bound callable has signature (state)->state.
+    """
+    def _mk(name: str, fn: NodeFn) -> Callable[[State], State]:
+        def _f(s: State) -> State:
+            return _timed_node(settings, s, name, fn)
+        return _f
+
+    def _mk_assembly() -> Callable[[State], State]:
+        def _f(s: State) -> State:
+            return _assembly_todo_nonfatal(settings, s)
+        return _f
+
+    return {
+        "load_sheet_data": _mk("load_sheet_data", load_sheet_data),
+        "generate_assembly_todo": _mk_assembly(),
+        "build_thread_snapshot": _mk("build_thread_snapshot", build_thread_snapshot),
+        "analyze_media": _mk("analyze_media", analyze_media),
+        "analyze_attachments": _mk("analyze_attachments", analyze_attachments),
+        "upsert_vectors": _mk("upsert_vectors", upsert_vectors),
+        "retrieve_context": _mk("retrieve_context", retrieve_context),
+        "rerank_context": _mk("rerank_context", rerank_context),
+        "generate_ai_reply": _mk("generate_ai_reply", generate_ai_reply),
+        "annotate_media": _mk("annotate_media", annotate_media),
+        "writeback": _mk("writeback", writeback),
     }
 
 
@@ -368,7 +328,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "logs": state.get("logs"),
                 }
 
-            # Keep these incremental ingest fast-paths as-is for now (they are not part of the checkin LangGraph yet)
+            # ---- Keep incremental ingest fast-paths (not part of checkin LangGraph yet) ----
             if event_type == "CCP_UPDATED":
                 ccp_id = str(payload.get("ccp_id") or "").strip()
                 if not ccp_id:
@@ -429,7 +389,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                 }
 
             if event_type == "PROJECT_UPDATED":
-                # payload should contain legacy_id (Project.ID)
                 state = _assembly_todo_nonfatal(settings, state)
                 runlog.success(run_id)
                 return {
@@ -441,87 +400,10 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "logs": state.get("logs"),
                 }
 
-            # -------------------------
-            # LangGraph orchestration for checkin/conversation flow
-            # -------------------------
-            compiled, node_factories = _build_langgraph_app()
+            # ---- LangGraph orchestration for checkin/conversation flow ----
+            state["__lg_bound_nodes__"] = _bind_nodes(settings)
 
-            # Bind runtime callables (closures capture `settings`)
-            # LangGraph compiled graph supports override via `config["configurable"]` only if using that pattern,
-            # so we instead wrap invocation by replacing the placeholder nodes via a shallow "dispatch" layer:
-            # We do this by storing bound callables in state and having placeholders call them.
-            bound: Dict[str, Callable[[State], State]] = {}
-            for k, fac in node_factories.items():
-                bound[k] = fac(settings)
-
-            state["__lg_bound_nodes__"] = bound  # internal
-
-            def _dispatch(node_name: str) -> Callable[[State], State]:
-                def _f(s: State) -> State:
-                    fn = (s.get("__lg_bound_nodes__") or {}).get(node_name)
-                    if not callable(fn):
-                        _ensure_logs(s).append(f"LangGraph dispatch missing node '{node_name}'")
-                        return s
-                    return fn(s)
-                return _f
-
-            # Monkeypatch nodes by wrapping compiled app with a lightweight runner:
-            # We re-run the same state machine but at each step the graph calls our dispatch nodes.
-            # To keep it simple, we call the original compiled graph but with a mapping layer:
-            # The compiled graph was built with placeholder lambdas, so it will NOT call dispatch unless we rebuild.
-            # Therefore, we rebuild a small graph instance here using dispatch nodes.
-            g2: StateGraph = StateGraph(dict)
-            for node_name in node_factories.keys():
-                g2.add_node(node_name, _dispatch(node_name))
-
-            g2.set_entry_point("load_sheet_data")
-            g2.add_edge("load_sheet_data", "generate_assembly_todo")
-            g2.add_edge("generate_assembly_todo", "build_thread_snapshot")
-            g2.add_edge("build_thread_snapshot", "analyze_media")
-            g2.add_edge("analyze_media", "analyze_attachments")
-
-            g2.add_conditional_edges(
-                "analyze_attachments",
-                _route_after_analyzers,
-                {
-                    "upsert_vectors": "upsert_vectors",
-                    "retrieve_context": "retrieve_context",
-                },
-            )
-
-            g2.add_edge("retrieve_context", "rerank_context")
-            g2.add_edge("rerank_context", "generate_ai_reply")
-            g2.add_edge("generate_ai_reply", "annotate_media")
-            g2.add_edge("annotate_media", "upsert_vectors")
-
-            def _route_after_upsert2(s: State) -> str:
-                payload2 = s.get("payload") or {}
-                event_type2 = str(s.get("event_type") or payload2.get("event_type") or "").strip()
-                m2 = _meta(payload2)
-
-                force_reply2 = _truthy(m2.get("force_reply"))
-                ingest_only_default2 = event_type2 in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
-                ingest_only2 = _truthy(m2.get("ingest_only") or m2.get("skip_reply") or m2.get("skip_ai_reply")) or ingest_only_default2
-                if event_type2 == "CHECKIN_CREATED" and force_reply2:
-                    ingest_only2 = False
-
-                if ingest_only2 or event_type2 != "CHECKIN_CREATED":
-                    return "END"
-                return "writeback"
-
-            g2.add_conditional_edges(
-                "upsert_vectors",
-                _route_after_upsert2,
-                {
-                    "END": END,
-                    "writeback": "writeback",
-                },
-            )
-
-            g2.add_edge("writeback", END)
-
-            app = g2.compile()
-
+            app = _build_langgraph_app()
             final_state: State = app.invoke(state)
 
             tenant_id = str(final_state.get("tenant_id") or "").strip()

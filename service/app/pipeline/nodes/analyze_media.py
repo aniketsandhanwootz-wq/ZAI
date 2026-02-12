@@ -1,19 +1,28 @@
 # service/app/pipeline/nodes/analyze_media.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import hashlib
 import re
 import base64
 
 from ...config import Settings
-from ...tools.sheets_tool import _key, _norm_value
-from ...tools.attachment_tool import split_cell_refs
-
 from ..lc_runtime import lc_registry, lc_invoke
 
 
 _IMG_EXT_RX = re.compile(r"\.(png|jpe?g|webp|bmp|tiff?)$", re.IGNORECASE)
+
+
+def _norm_value(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x.strip()
+    return str(x).strip()
+
+
+def _key(s: Any) -> str:
+    return re.sub(r"\s+", " ", _norm_value(s)).strip().lower()
 
 
 def _sha256(b: bytes) -> str:
@@ -23,10 +32,6 @@ def _sha256(b: bytes) -> str:
 
 
 def _looks_like_media_ref(s: str) -> bool:
-    """
-    Accept URLs + Drive rel paths + image-looking names.
-    We also allow PDFs via URL or rel path; we'll byte-sniff after download.
-    """
     ss = (s or "").strip()
     if not ss:
         return False
@@ -35,25 +40,6 @@ def _looks_like_media_ref(s: str) -> bool:
     if "/" in ss:
         return True
     return bool(_IMG_EXT_RX.search(ss)) or ss.lower().endswith(".pdf")
-
-
-def _collect_photo_cells_from_additional_rows(rows: List[Dict[str, Any]]) -> List[str]:
-    refs: List[str] = []
-    for r in rows or []:
-        for k, v in (r or {}).items():
-            kk = (k or "").strip()
-            if not kk:
-                continue
-            kk_l = kk.lower().strip()
-            if not kk_l.startswith("photo"):
-                continue
-            cell = _norm_value(v)
-            if not cell:
-                continue
-            for ref in split_cell_refs(cell):
-                if _looks_like_media_ref(ref):
-                    refs.append(ref)
-    return refs
 
 
 def _sniff_mime(data: bytes) -> str:
@@ -79,21 +65,27 @@ def _b64(b: bytes) -> str:
     return base64.b64encode(b or b"").decode("utf-8")
 
 
-def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Checkin media ingestion (incremental-safe):
-      - CheckIN inspection image URL
-      - Conversation.Photo
-      - Additional photos sheet
+def _collect_photo_cells_from_additional_rows(reg, rows: List[Dict[str, Any]], state: Dict[str, Any]) -> List[str]:
+    refs: List[str] = []
+    for r in rows or []:
+        for k, v in (r or {}).items():
+            kk = (k or "").strip()
+            if not kk:
+                continue
+            if not kk.lower().strip().startswith("photo"):
+                continue
+            cell = _norm_value(v)
+            if not cell:
+                continue
 
-    For each ref:
-      - resolve -> download bytes (LC tools)
-      - sniff mime
-      - Image => caption (optional) + store raw bytes into state["media_images"] for multimodal LLM
-      - PDF => store PDF_ATTACHMENT + add a "PDF:" entry into captions list
-      - store artifacts idempotently (by source_hash)
-      - append MEDIA OBSERVATIONS into thread_snapshot_text
-    """
+            parts = lc_invoke(reg, "attachment_split_cell_refs", {"cell": cell}, state, default=[]) or []
+            for ref in parts:
+                if _looks_like_media_ref(ref):
+                    refs.append(ref)
+    return refs
+
+
+def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     allowed = {"CHECKIN_CREATED", "CHECKIN_UPDATED", "CONVERSATION_ADDED"}
     if (state.get("event_type") or "") not in allowed:
         state.setdefault("logs", []).append(f"analyze_media: skipped (event_type not in {sorted(allowed)})")
@@ -109,7 +101,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
     reg = lc_registry(settings, state)
 
-    # Existing captions (idempotent reruns)
     existing_captions_by_hash = lc_invoke(
         reg,
         "db_image_captions_by_hash",
@@ -121,7 +112,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         existing_captions_by_hash = {}
     existing_caption_hashes = set(existing_captions_by_hash.keys())
 
-    # Existing artifacts (idempotency)
     existing_pdf_hashes = set(
         (lc_invoke(
             reg,
@@ -141,26 +131,26 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         ) or {}).get("hashes", []) or []
     )
 
-    # CheckIN inspection images
     checkin_row = state.get("checkin_row") or {}
     col_img = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "inspection_image_url"}, state, default="")
     img_cell = _norm_value(checkin_row.get(_key(col_img), "")) if col_img else ""
-    main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_media_ref(r)]
 
-    # Conversation.Photo refs
+    main_refs = lc_invoke(reg, "attachment_split_cell_refs", {"cell": img_cell or ""}, state, default=[]) or []
+    main_refs = [r for r in main_refs if _looks_like_media_ref(r)]
+
     convo_refs: List[str] = []
     try:
         col_convo_photo = lc_invoke(reg, "sheets_map_col", {"table": "conversation", "field": "photos"}, state, default="")
         k_convo_photo = _key(col_convo_photo) if col_convo_photo else ""
         for cr in (state.get("conversation_rows") or [])[-50:]:
             cell = _norm_value((cr or {}).get(k_convo_photo, "")) if k_convo_photo else ""
-            for ref in split_cell_refs(cell):
+            parts = lc_invoke(reg, "attachment_split_cell_refs", {"cell": cell or ""}, state, default=[]) or []
+            for ref in parts:
                 if _looks_like_media_ref(ref):
                     convo_refs.append(ref)
     except Exception as e:
         state.setdefault("logs", []).append(f"analyze_media: conversation photo parse failed (non-fatal): {e}")
 
-    # Additional photos sheet
     add_refs: List[str] = []
     try:
         add_tab = (getattr(settings, "additional_photos_tab_name", "Checkin Additional photos") or "").strip()
@@ -171,7 +161,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             state,
             default=[],
         ) or []
-        add_refs = _collect_photo_cells_from_additional_rows(add_rows)
+        add_refs = _collect_photo_cells_from_additional_rows(reg, add_rows, state)
         state.setdefault("logs", []).append(
             f"analyze_media: additional_photos rows={len(add_rows or [])} refs={len(add_refs)} tab='{add_tab}'"
         )
@@ -179,7 +169,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         state.setdefault("logs", []).append(f"analyze_media: additional photos read failed (non-fatal): {e}")
         add_refs = []
 
-    # Dedup + cap
     refs: List[str] = []
     seen = set()
     for r in (main_refs or []) + (convo_refs or []) + (add_refs or []):
@@ -244,7 +233,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         is_pdf = (mime == "application/pdf") or str(att.get("name") or "").lower().endswith(".pdf")
         is_img = _is_image_mime(mime)
 
-        # Record source bytes artifact (IMAGE_SOURCE) for idempotent bookkeeping
         if is_img and source_hash not in existing_image_source_hashes:
             ok = lc_invoke(
                 reg,
@@ -313,10 +301,8 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
-        # Reuse caption if present
         caption = (existing_captions_by_hash.get(source_hash) or "").strip()
 
-        # Caption if missing
         if not caption:
             cap = lc_invoke(
                 reg,
@@ -366,7 +352,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
 
     state["media_images"] = media_images
 
-    # Provide captions for downstream MEDIA vector upsert (existing + new)
     all_caps: List[str] = []
     seen_caps = set()
 
@@ -392,7 +377,6 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         state["thread_snapshot_text"] = (snap + "\n\n" + note_block).strip()
 
     state.setdefault("logs", []).append(
-        f"analyze_media: done refs={len(refs)} images={len(media_images)} "
-        f"captions_total={len(state.get('image_captions') or [])}"
+        f"analyze_media: done refs={len(refs)} images={len(media_images)} captions_total={len(state.get('image_captions') or [])}"
     )
     return state

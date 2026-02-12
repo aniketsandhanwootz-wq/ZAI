@@ -16,7 +16,7 @@ def lc_registry(settings, state: Dict[str, Any]):
     reg = state.get("tool_registry")
     if reg is not None:
         return reg
-    from ..tools import get_tool_registry  # local import to avoid cycles
+    from ..tools.langchain_tools import get_tool_registry  # local import to avoid cycles
     reg = get_tool_registry(settings)
     state["tool_registry"] = reg
     return reg
