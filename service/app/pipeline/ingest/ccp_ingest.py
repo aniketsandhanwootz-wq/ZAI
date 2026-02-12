@@ -4,8 +4,7 @@ from typing import Dict, Any, Tuple, List, Optional
 from io import BytesIO
 import re
 
-from pypdf import PdfReader
-
+from ...tools.file_extractors.pdf_extractor import extract_pdf as robust_extract_pdf
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.embed_tool import EmbedTool
@@ -16,13 +15,21 @@ from ...tools.vision_tool import VisionTool
 from . import utils as ingest_utils
 
 
-def _extract_pdf_text_from_bytes(data: bytes) -> str:
+def _extract_pdf_text_from_bytes(*, filename: str, data: bytes, vision: VisionTool) -> str:
+    """
+    Uses the shared robust PDF extractor:
+      - page sampling (head+tail+middle)
+      - OCR fallback for scanned/table-like pages (VisionTool in OCR_MODE)
+    """
     try:
-        reader = PdfReader(BytesIO(data))
-        out = []
-        for page in reader.pages:
-            out.append(page.extract_text() or "")
-        return "\n".join(out).strip()
+        res = robust_extract_pdf(
+            filename=filename or "ccp.pdf",
+            data=data,
+            max_pages=40,
+            max_chars=140000,
+            vision_caption_fn=vision.caption_image,  # signature matches: (image_bytes, mime_type, context)
+        )
+        return (res.extracted_text or "").strip()
     except Exception:
         return ""
 
