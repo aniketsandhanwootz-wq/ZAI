@@ -5,7 +5,7 @@ import base64
 import json
 import os
 from typing import Any, Dict, List
-from .langsmith_trace import traceable_wrap, mk_http_meta
+from .langsmith_trace import traceable_wrap
 import requests
 
 from ..config import Settings
