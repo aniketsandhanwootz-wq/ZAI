@@ -4,11 +4,16 @@ uvicorn[standard]==0.40.0
 # Google Sheets API
 google-api-python-client==2.189.0
 google-auth==2.48.0
+google-auth-oauthlib==1.2.4
+google-auth-httplib2==0.3.0
 
 # HTTP + utils
 requests==2.32.5
-pydantic==2.12.5
 python-dotenv==1.2.1
+pyyaml==6.0.3
+
+# Pydantic (single pin)
+pydantic==2.12.5
 
 # Postgres
 psycopg2-binary==2.9.11
@@ -17,20 +22,16 @@ psycopg2-binary==2.9.11
 redis==7.1.1
 rq==2.6.1
 
-# LangChain + LangGraph (code mode)
-langchain==1.2.10
-langgraph==1.0.8
-langsmith
+# LangChain stack (aligned)
+langchain==0.2.10
+langchain-core==0.2.29
+langsmith==0.1.96
+langgraph==0.1.19
 
-
-pyyaml==6.0.3
+# PDFs + imaging
 pypdf==6.7.0
-
 Pillow==12.1.0
-
-# Google Auth libraries
-google-auth-oauthlib==1.2.4
-google-auth-httplib2==0.3.0
-
 pymupdf
+
+# Excel
 openpyxl
