@@ -1,22 +1,28 @@
+# service/app/pipeline/nodes/analyze_media.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import hashlib
 import re
-import logging
-
+import base64
 
 from ...config import Settings
-from ...tools.sheets_tool import SheetsTool, _key, _norm_value
-from ...tools.drive_tool import DriveTool
-from ...tools.attachment_tool import AttachmentResolver, split_cell_refs, ResolvedAttachment
-from ...tools.vision_tool import VisionTool
-from ...tools.db_tool import DBTool
+from ..lc_runtime import lc_registry, lc_invoke
 
 
 _IMG_EXT_RX = re.compile(r"\.(png|jpe?g|webp|bmp|tiff?)$", re.IGNORECASE)
 
-logger = logging.getLogger("zai.media")
+
+def _norm_value(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x.strip()
+    return str(x).strip()
+
+
+def _key(s: Any) -> str:
+    return re.sub(r"\s+", " ", _norm_value(s)).strip().lower()
 
 
 def _sha256(b: bytes) -> str:
@@ -26,10 +32,6 @@ def _sha256(b: bytes) -> str:
 
 
 def _looks_like_media_ref(s: str) -> bool:
-    """
-    Accept URLs + Drive rel paths + image-looking names.
-    We also allow PDFs via URL or rel path; we'll byte-sniff after download.
-    """
     ss = (s or "").strip()
     if not ss:
         return False
@@ -38,29 +40,6 @@ def _looks_like_media_ref(s: str) -> bool:
     if "/" in ss:
         return True
     return bool(_IMG_EXT_RX.search(ss)) or ss.lower().endswith(".pdf")
-
-
-def _collect_photo_cells_from_additional_rows(rows: List[Dict[str, Any]]) -> List[str]:
-    refs: List[str] = []
-    for r in rows or []:
-        for k, v in (r or {}).items():
-            kk = (k or "").strip()
-            if not kk:
-                continue
-
-            kk_l = kk.lower().strip()
-            # Your sheet headers: Photo, Photo 2, Photo 3...
-            if not kk_l.startswith("photo"):
-                continue
-
-            cell = _norm_value(v)
-            if not cell:
-                continue
-
-            for ref in split_cell_refs(cell):
-                if _looks_like_media_ref(ref):
-                    refs.append(ref)
-    return refs
 
 
 def _sniff_mime(data: bytes) -> str:
@@ -82,119 +61,114 @@ def _is_image_mime(m: str) -> bool:
     return (m or "").startswith("image/")
 
 
+def _b64(b: bytes) -> str:
+    return base64.b64encode(b or b"").decode("utf-8")
+
+
+def _collect_photo_cells_from_additional_rows(reg, rows: List[Dict[str, Any]], state: Dict[str, Any]) -> List[str]:
+    refs: List[str] = []
+    for r in rows or []:
+        for k, v in (r or {}).items():
+            kk = (k or "").strip()
+            if not kk:
+                continue
+            if not kk.lower().strip().startswith("photo"):
+                continue
+            cell = _norm_value(v)
+            if not cell:
+                continue
+
+            parts = lc_invoke(reg, "attachment_split_cell_refs", {"cell": cell}, state, default=[]) or []
+            for ref in parts:
+                if _looks_like_media_ref(ref):
+                    refs.append(ref)
+    return refs
+
+
 def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Checkin media ingestion (incremental-safe):
-      - CheckIN inspection image URL
-      - Conversation.Photo
-      - Additional photos sheet
-
-    For each ref:
-      - download bytes (supports Drive id + drive paths)
-      - byte-sniff mime
-      - Image => caption (for vectors) + STORE image bytes into state["media_images"] for multimodal LLM
-      - PDF => store PDF_ATTACHMENT + add a "PDF:" entry into captions list
-      - store artifacts idempotently (by source_hash)
-      - append MEDIA OBSERVATIONS into thread_snapshot_text
-
-    NOTE:
-      - Defect detection is NO LONGER done here.
-      - Defects are detected in main prompt (checkin_reply.md) and later annotated+uploaded by annotate_media node.
-    """
     allowed = {"CHECKIN_CREATED", "CHECKIN_UPDATED", "CONVERSATION_ADDED"}
     if (state.get("event_type") or "") not in allowed:
-        (state.get("logs") or []).append(f"analyze_media: skipped (event_type not in {sorted(allowed)})")
+        state.setdefault("logs", []).append(f"analyze_media: skipped (event_type not in {sorted(allowed)})")
         return state
 
     tenant_id = (state.get("tenant_id") or "").strip()
     checkin_id = (state.get("checkin_id") or "").strip()
     run_id = (state.get("run_id") or "").strip()
     if not tenant_id or not checkin_id or not run_id:
-        (state.get("logs") or []).append("analyze_media: skipped (missing tenant/checkin/run_id)")
-        return state
-
-    sheets = SheetsTool(settings)
-    try:
-        drive = DriveTool(settings)
-        resolver = AttachmentResolver(drive)
-    except Exception as e:
-        state.setdefault("logs", []).append(f"analyze_media: Drive init failed (non-fatal): {e}")
+        state.setdefault("logs", []).append("analyze_media: skipped (missing tenant/checkin/run_id)")
         state["media_images"] = []
         return state
 
-    db = DBTool(settings.database_url)
+    reg = lc_registry(settings, state)
 
-    do_caption = bool(getattr(settings, "vision_api_key", "").strip())
-    vision: Optional[VisionTool] = None
-    if do_caption:
-        vision = VisionTool(
-            api_key=getattr(settings, "vision_api_key", ""),
-            model=getattr(settings, "vision_model", "gemini-2.0-flash"),
-        )
-    else:
-        (state.get("logs") or []).append("analyze_media: VISION_API_KEY not set -> captioning skipped, but images will be passed to LLM")
-
-    # Load existing captions so media-only ingest can still upsert MEDIA vectors on reruns
-    existing_captions_by_hash = db.image_captions_by_hash(
-        tenant_id=tenant_id,
-        checkin_id=checkin_id,
-    )
+    existing_captions_by_hash = lc_invoke(
+        reg,
+        "db_image_captions_by_hash",
+        {"tenant_id": tenant_id, "checkin_id": checkin_id},
+        state,
+        default={},
+    ) or {}
+    if not isinstance(existing_captions_by_hash, dict):
+        existing_captions_by_hash = {}
     existing_caption_hashes = set(existing_captions_by_hash.keys())
 
-
-    existing_pdf_hashes = db.existing_artifact_source_hashes(
-        tenant_id=tenant_id,
-        checkin_id=checkin_id,
-        artifact_type="PDF_ATTACHMENT",
+    existing_pdf_hashes = set(
+        (lc_invoke(
+            reg,
+            "db_existing_artifact_source_hashes",
+            {"tenant_id": tenant_id, "checkin_id": checkin_id, "artifact_type": "PDF_ATTACHMENT"},
+            state,
+            default={"hashes": []},
+        ) or {}).get("hashes", []) or []
     )
-    existing_image_source_hashes = db.existing_artifact_source_hashes(
-        tenant_id=tenant_id,
-        checkin_id=checkin_id,
-        artifact_type="IMAGE_SOURCE",
+    existing_image_source_hashes = set(
+        (lc_invoke(
+            reg,
+            "db_existing_artifact_source_hashes",
+            {"tenant_id": tenant_id, "checkin_id": checkin_id, "artifact_type": "IMAGE_SOURCE"},
+            state,
+            default={"hashes": []},
+        ) or {}).get("hashes", []) or []
     )
 
-    # CheckIN inspection image cell
     checkin_row = state.get("checkin_row") or {}
-    col_img = sheets.map.col("checkin", "inspection_image_url")
-    img_cell = _norm_value(checkin_row.get(_key(col_img), ""))
-    main_refs = [r for r in split_cell_refs(img_cell) if _looks_like_media_ref(r)]
+    col_img = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "inspection_image_url"}, state, default="")
+    img_cell = _norm_value(checkin_row.get(_key(col_img), "")) if col_img else ""
 
-    # Conversation.Photo refs
+    main_refs = lc_invoke(reg, "attachment_split_cell_refs", {"cell": img_cell or ""}, state, default=[]) or []
+    main_refs = [r for r in main_refs if _looks_like_media_ref(r)]
+
     convo_refs: List[str] = []
     try:
-        col_convo_photo = sheets.map.col("conversation", "photos")
-        k_convo_photo = _key(col_convo_photo)
+        col_convo_photo = lc_invoke(reg, "sheets_map_col", {"table": "conversation", "field": "photos"}, state, default="")
+        k_convo_photo = _key(col_convo_photo) if col_convo_photo else ""
         for cr in (state.get("conversation_rows") or [])[-50:]:
-            cell = _norm_value((cr or {}).get(k_convo_photo, ""))
-            for ref in split_cell_refs(cell):
+            cell = _norm_value((cr or {}).get(k_convo_photo, "")) if k_convo_photo else ""
+            parts = lc_invoke(reg, "attachment_split_cell_refs", {"cell": cell or ""}, state, default=[]) or []
+            for ref in parts:
                 if _looks_like_media_ref(ref):
                     convo_refs.append(ref)
     except Exception as e:
-        (state.get("logs") or []).append(f"analyze_media: conversation photo parse failed (non-fatal): {e}")
+        state.setdefault("logs", []).append(f"analyze_media: conversation photo parse failed (non-fatal): {e}")
 
-    # Additional photos sheet (separate spreadsheet)
     add_refs: List[str] = []
     try:
-        from dataclasses import replace
-
-        add_sheet_id = (getattr(settings, "additional_photos_spreadsheet_id", "") or "").strip()
         add_tab = (getattr(settings, "additional_photos_tab_name", "Checkin Additional photos") or "").strip()
-
-        # Make a settings clone so SheetsTool uses the additional spreadsheet id
-        settings_add = replace(settings, spreadsheet_id=add_sheet_id) if add_sheet_id else settings
-        sheets_add = SheetsTool(settings_add)
-
-        add_rows = sheets_add.list_additional_photos_for_checkin(checkin_id, tab_name=add_tab)
-        add_refs = _collect_photo_cells_from_additional_rows(add_rows)
-
-        (state.get("logs") or []).append(
+        add_rows = lc_invoke(
+            reg,
+            "sheets_list_additional_photos_for_checkin",
+            {"checkin_id": checkin_id, "tab_name": add_tab},
+            state,
+            default=[],
+        ) or []
+        add_refs = _collect_photo_cells_from_additional_rows(reg, add_rows, state)
+        state.setdefault("logs", []).append(
             f"analyze_media: additional_photos rows={len(add_rows or [])} refs={len(add_refs)} tab='{add_tab}'"
         )
     except Exception as e:
-        (state.get("logs") or []).append(f"analyze_media: additional photos read failed (non-fatal): {e}")
+        state.setdefault("logs", []).append(f"analyze_media: additional photos read failed (non-fatal): {e}")
         add_refs = []
 
-    # Dedup + cap
     refs: List[str] = []
     seen = set()
     for r in (main_refs or []) + (convo_refs or []) + (add_refs or []):
@@ -204,7 +178,7 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             seen.add(rr)
 
     if not refs:
-        (state.get("logs") or []).append("analyze_media: no media refs found")
+        state.setdefault("logs", []).append("analyze_media: no media refs found")
         state["media_images"] = []
         return state
 
@@ -221,33 +195,63 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     ).strip()
 
     for ref in refs:
-        att: Optional[ResolvedAttachment] = resolver.resolve(ref)
-        if not att:
+        att = lc_invoke(reg, "attachment_resolve", {"ref": ref}, state, default=None)
+        if not isinstance(att, dict) or not att:
             continue
 
-        data = resolver.fetch_bytes(att)
+        fetch = lc_invoke(
+            reg,
+            "attachment_fetch_bytes",
+            {
+                "source_ref": att.get("source_ref") or "",
+                "kind": att.get("kind") or "",
+                "name": att.get("name") or "",
+                "mime_type": att.get("mime_type") or "",
+                "is_pdf": bool(att.get("is_pdf")),
+                "is_image": bool(att.get("is_image")),
+                "drive_file_id": att.get("drive_file_id"),
+                "direct_url": att.get("direct_url"),
+                "rel_path": att.get("rel_path"),
+                "timeout": 40,
+                "max_bytes": 15_000_000,
+            },
+            state,
+            default=None,
+        )
+        if not isinstance(fetch, dict) or not fetch.get("content_b64"):
+            continue
+
+        try:
+            data = base64.b64decode(fetch.get("content_b64") or "")
+        except Exception:
+            continue
         if not data:
             continue
 
         source_hash = _sha256(data)
-        mime = (att.mime_type or "").strip() or _sniff_mime(data) or "application/octet-stream"
-        is_pdf = (mime == "application/pdf") or (att.name or "").lower().endswith(".pdf")
+        mime = (att.get("mime_type") or "").strip() or _sniff_mime(data) or "application/octet-stream"
+        is_pdf = (mime == "application/pdf") or str(att.get("name") or "").lower().endswith(".pdf")
         is_img = _is_image_mime(mime)
 
-        # Record the source bytes as an artifact (DB only) for idempotent ingestion bookkeeping.
         if is_img and source_hash not in existing_image_source_hashes:
-            ok = db.insert_artifact_no_fail(
-                run_id=run_id,
-                artifact_type="IMAGE_SOURCE",
-                url=att.source_ref or att.rel_path or "unknown",
-                meta={
-                    "tenant_id": tenant_id,
-                    "checkin_id": checkin_id,
-                    "source_ref": att.source_ref,
-                    "source_hash": source_hash,
-                    "file_name": att.name,
-                    "mime_type": mime,
+            ok = lc_invoke(
+                reg,
+                "db_insert_artifact_no_fail",
+                {
+                    "run_id": run_id,
+                    "artifact_type": "IMAGE_SOURCE",
+                    "url": (att.get("source_ref") or att.get("rel_path") or "unknown"),
+                    "meta": {
+                        "tenant_id": tenant_id,
+                        "checkin_id": checkin_id,
+                        "source_ref": att.get("source_ref"),
+                        "source_hash": source_hash,
+                        "file_name": att.get("name"),
+                        "mime_type": mime,
+                    },
                 },
+                state,
+                default=False,
             )
             if ok:
                 existing_image_source_hashes.add(source_hash)
@@ -255,22 +259,29 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         if is_pdf:
             if source_hash in existing_pdf_hashes:
                 continue
-            db.insert_artifact_no_fail(
-                run_id=run_id,
-                artifact_type="PDF_ATTACHMENT",
-                url=att.source_ref or att.rel_path or "unknown",
-                meta={
-                    "tenant_id": tenant_id,
-                    "checkin_id": checkin_id,
-                    "source_ref": att.source_ref,
-                    "source_hash": source_hash,
-                    "file_name": att.name,
-                    "mime_type": mime,
+
+            lc_invoke(
+                reg,
+                "db_insert_artifact_no_fail",
+                {
+                    "run_id": run_id,
+                    "artifact_type": "PDF_ATTACHMENT",
+                    "url": (att.get("source_ref") or att.get("rel_path") or "unknown"),
+                    "meta": {
+                        "tenant_id": tenant_id,
+                        "checkin_id": checkin_id,
+                        "source_ref": att.get("source_ref"),
+                        "source_hash": source_hash,
+                        "file_name": att.get("name"),
+                        "mime_type": mime,
+                    },
                 },
+                state,
+                default=False,
             )
 
             existing_pdf_hashes.add(source_hash)
-            pdf_line = f"PDF: {att.name or 'attachment'} (no text extracted)"
+            pdf_line = f"PDF: {att.get('name') or 'attachment'} (no text extracted)"
             new_captions.append(pdf_line)
             media_notes.append(f"- Doc: {pdf_line}")
             continue
@@ -284,58 +295,63 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 "image_index": img_index,
                 "mime_type": mime if mime.startswith("image/") else "image/jpeg",
                 "image_bytes": data,
-                "source_ref": att.source_ref or att.rel_path or "unknown",
-                "file_name": att.name or "",
+                "source_ref": att.get("source_ref") or att.get("rel_path") or "unknown",
+                "file_name": att.get("name") or "",
                 "source_hash": source_hash,
             }
         )
 
-        # If already captioned before, reuse it (idempotent reruns)
         caption = (existing_captions_by_hash.get(source_hash) or "").strip()
 
-
-        if do_caption and vision and not caption:
-            try:
-                caption = vision.caption_for_retrieval(
-                    image_bytes=data,
-                    mime_type=mime if mime.startswith("image/") else "image/jpeg",
-                    context_hint=context_hint,
-                ).strip()
-            except Exception as e:
-                (state.get("logs") or []).append(f"analyze_media: caption failed (non-fatal) ref={ref} err={e}")
-                caption = ""
+        if not caption:
+            cap = lc_invoke(
+                reg,
+                "vision_caption_for_retrieval",
+                {
+                    "image_b64": _b64(data),
+                    "mime_type": mime if mime.startswith("image/") else "image/jpeg",
+                    "context_hint": context_hint,
+                    "model": None,
+                },
+                state,
+                default="",
+            )
+            caption = str(cap or "").strip()
 
             if caption and source_hash not in existing_caption_hashes:
-                ok = db.insert_artifact_no_fail(
-                    run_id=run_id,
-                    artifact_type="IMAGE_CAPTION",
-                    url=att.source_ref or att.rel_path or "unknown",
-                    meta={
-                        "tenant_id": tenant_id,
-                        "checkin_id": checkin_id,
-                        "source_ref": att.source_ref,
-                        "source_hash": source_hash,
-                        "file_name": att.name,
-                        "mime_type": mime,
-                        "caption": caption,
-                        "vision_model": getattr(settings, "vision_model", ""),
+                ok = lc_invoke(
+                    reg,
+                    "db_insert_artifact_no_fail",
+                    {
+                        "run_id": run_id,
+                        "artifact_type": "IMAGE_CAPTION",
+                        "url": (att.get("source_ref") or att.get("rel_path") or "unknown"),
+                        "meta": {
+                            "tenant_id": tenant_id,
+                            "checkin_id": checkin_id,
+                            "source_ref": att.get("source_ref"),
+                            "source_hash": source_hash,
+                            "file_name": att.get("name"),
+                            "mime_type": mime,
+                            "caption": caption,
+                            "vision_model": getattr(settings, "vision_model", ""),
+                        },
                     },
+                    state,
+                    default=False,
                 )
                 if ok:
                     existing_caption_hashes.add(source_hash)
                     existing_captions_by_hash[source_hash] = caption
                     new_captions.append(caption)
 
-
         if caption:
             media_notes.append(f"- Image: {caption}")
         else:
-            media_notes.append(f"- Image: {(att.name or 'image').strip()}")
+            media_notes.append(f"- Image: {(att.get('name') or 'image').strip()}")
 
     state["media_images"] = media_images
 
-    # Always provide captions for downstream MEDIA vector upsert:
-    # includes both existing (from DB) and new (from this run)
     all_caps: List[str] = []
     seen_caps = set()
 
@@ -354,16 +370,13 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     if all_caps:
         state["image_captions"] = all_caps
 
-
     if media_notes:
         note_block = "MEDIA OBSERVATIONS:\n" + "\n".join(media_notes)
         state["media_notes"] = note_block
         snap = (state.get("thread_snapshot_text") or "").strip()
         state["thread_snapshot_text"] = (snap + "\n\n" + note_block).strip()
 
-    (state.get("logs") or []).append(
-        f"analyze_media: done refs={len(refs)} images={len(media_images)} "
-        f"captions_new={len([c for c in new_captions if not str(c).startswith('PDF:')])} "
-        f"pdfs_new={len([c for c in new_captions if str(c).startswith('PDF:')])}"
+    state.setdefault("logs", []).append(
+        f"analyze_media: done refs={len(refs)} images={len(media_images)} captions_total={len(state.get('image_captions') or [])}"
     )
     return state

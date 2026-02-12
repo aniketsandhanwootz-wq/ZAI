@@ -4,20 +4,25 @@ from typing import Any, Dict, Optional, List
 import re
 
 from ...config import Settings
-from ...tools.sheets_tool import SheetsTool, _key, _norm_value
-from ...tools.company_tool import CompanyTool
-from ...tools.company_cache_tool import CompanyCacheTool
-from ...tools.embed_tool import EmbedTool
-from ...tools.vector_tool import VectorTool
-
-from ...tools.drive_tool import DriveTool
-from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
+from ..lc_runtime import lc_registry, lc_invoke
 
 
 _CLOSURE_HINTS = re.compile(
     r"\b(resolved|fixed|rework|reworked|ok now|closed|passed|pass|accepted|root cause|rca|tool change|offset|fixture|grind|stress\s*relief|heat\s*treat|calibrat|corrected)\b",
     re.IGNORECASE,
 )
+
+
+def _norm_value(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x.strip()
+    return str(x).strip()
+
+
+def _key(s: Any) -> str:
+    return re.sub(r"\s+", " ", _norm_value(s)).strip().lower()
 
 
 def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
@@ -51,41 +56,33 @@ def _extract_closure_notes(convo_rows: List[Dict[str, Any]]) -> str:
     out = out[-8:]
     return "\n- " + "\n- ".join(out) if out else ""
 
+
 def _norm_header(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
 def _find_row_value(row: Dict[str, Any], *, preferred_key: Optional[str], fallbacks: List[str]) -> str:
-    """
-    Return the first NON-EMPTY value.
-    - Try preferred_key first
-    - Then try fallback headers
-    """
     if not row:
         return ""
 
-    # 1) preferred_key
     if preferred_key and preferred_key in row:
         v = _norm_value(row.get(preferred_key, ""))
-        if v:  # ✅ skip empty
+        if v:
             return v
 
-    # 2) fallbacks (first non-empty wins)
     norm_map = {_norm_header(k): k for k in row.keys()}
     for fb in fallbacks:
         k = norm_map.get(_norm_header(fb))
         if not k:
             continue
         v = _norm_value(row.get(k, ""))
-        if v:  # ✅ skip empty
+        if v:
             return v
 
     return ""
 
 
 def _drive_view_url(file_id: str) -> str:
-    # Works well with Adaptive Cards IF the file is accessible by link.
-    # If not accessible, you must share/permit it (see note below).
     fid = (file_id or "").strip()
     if not fid:
         return ""
@@ -93,23 +90,22 @@ def _drive_view_url(file_id: str) -> str:
 
 
 def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
-    sheets = SheetsTool(settings)
+    reg = lc_registry(settings, state)
     payload = state.get("payload") or {}
 
     # -------------------------
-    # ✅ Meta flags / overrides (important for admin media backfill)
+    # Meta flags / overrides
     # -------------------------
     meta = payload.get("meta") or {}
     state["meta"] = meta
 
-    # Flags can be passed either at top-level or inside meta
     state["ingest_only"] = bool(meta.get("ingest_only") or payload.get("ingest_only") or False)
     state["media_only"] = bool(meta.get("media_only") or payload.get("media_only") or False)
 
-    # Allow tenant override (admin media backfill resolves tenant up-front)
-    meta_tenant_id = _norm_value(str(meta.get("tenant_id") or ""))
+    meta_tenant_id = _norm_value(meta.get("tenant_id") or "")
     if meta_tenant_id:
         state["tenant_id"] = meta_tenant_id
+
     checkin_id = payload.get("checkin_id")
     conversation_id = payload.get("conversation_id")
     ccp_id = payload.get("ccp_id")
@@ -121,15 +117,28 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     state["legacy_id"] = legacy_id
     state["event_type"] = payload.get("event_type", "")
 
-    k_ci_project = _key(sheets.map.col("checkin", "project_name"))
-    k_ci_part = _key(sheets.map.col("checkin", "part_number"))
-    k_ci_legacy = _key(sheets.map.col("checkin", "legacy_id"))
-    k_ci_status = _key(sheets.map.col("checkin", "status"))
-    k_ci_desc = _key(sheets.map.col("checkin", "description"))
+    # Mapping keys via tool
+    col_ci_project = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "project_name"}, state, default="")
+    col_ci_part = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "part_number"}, state, default="")
+    col_ci_legacy = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "legacy_id"}, state, default="")
+    col_ci_status = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "status"}, state, default="")
+    col_ci_desc = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "description"}, state, default="")
+
+    k_ci_project = _key(col_ci_project)
+    k_ci_part = _key(col_ci_part)
+    k_ci_legacy = _key(col_ci_legacy)
+    k_ci_status = _key(col_ci_status)
+    k_ci_desc = _key(col_ci_desc)
 
     checkin_row: Optional[Dict[str, Any]] = None
     if checkin_id:
-        checkin_row = sheets.get_checkin_by_id(str(checkin_id))
+        checkin_row = lc_invoke(
+            reg,
+            "sheets_get_checkin_by_id",
+            {"checkin_id": str(checkin_id)},
+            state,
+            default=None,
+        )
     state["checkin_row"] = checkin_row
 
     project_name = _norm_value((checkin_row or {}).get(k_ci_project, ""))
@@ -146,27 +155,15 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     state["checkin_description"] = _norm_value((checkin_row or {}).get(k_ci_desc, ""))
 
     # -------------------------
-    # ✅ Extra fields needed for Teams post formatting
+    # Extra fields needed for Teams post formatting
     # -------------------------
-    # Try mapping keys first; if mapping doesn't have these, fallback to raw header names.
-    k_ci_created_by = None
-    k_ci_item_id = None
-    k_ci_insp_img = None
+    col_ci_created_by = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "created_by"}, state, default="")
+    col_ci_item_id = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "id"}, state, default="")
+    col_ci_insp_img = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "inspection_image"}, state, default="")
 
-    try:
-        k_ci_created_by = _key(sheets.map.col("checkin", "created_by"))
-    except Exception:
-        pass
-
-    try:
-        k_ci_item_id = _key(sheets.map.col("checkin", "id"))
-    except Exception:
-        pass
-
-    try:
-        k_ci_insp_img = _key(sheets.map.col("checkin", "inspection_image"))
-    except Exception:
-        pass
+    k_ci_created_by = _key(col_ci_created_by) if col_ci_created_by else None
+    k_ci_item_id = _key(col_ci_item_id) if col_ci_item_id else None
+    k_ci_insp_img = _key(col_ci_insp_img) if col_ci_insp_img else None
 
     created_by = _find_row_value(
         checkin_row or {},
@@ -198,181 +195,149 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     state["checkin_item_id"] = item_id or None
 
     # Resolve inspection images into URLs (best-effort)
-    refs = split_cell_refs(insp_cell) if insp_cell else []
+    refs = lc_invoke(reg, "attachment_split_cell_refs", {"cell": insp_cell or ""}, state, default=[]) or []
     state["checkin_image_refs"] = refs
 
     urls: List[str] = []
-    try:
-        drive = DriveTool(settings)
-        resolver = AttachmentResolver(drive)
+    for ref in refs[:3]:
+        att = lc_invoke(reg, "attachment_resolve", {"ref": ref}, state, default=None)
+        if not att:
+            continue
 
-        for ref in refs[:3]:
-            att = resolver.resolve(ref)
-            if not att:
-                continue
+        direct_url = (att.get("direct_url") or "").strip()
+        if direct_url:
+            urls.append(direct_url)
+            continue
 
-            # Direct URL already
-            if att.direct_url:
-                u = (att.direct_url or "").strip()
-                if u:
-                    urls.append(u)
-                continue
-
-            # Drive file id => convert to view URL
-            if att.drive_file_id:
-                u = _drive_view_url(att.drive_file_id)
-                if u:
-                    urls.append(u)
-                continue
-
-    except Exception as e:
-        (state.get("logs") or []).append(f"Inspection image resolve failed (non-fatal): {e}")
+        drive_file_id = (att.get("drive_file_id") or "").strip()
+        if drive_file_id:
+            u = _drive_view_url(drive_file_id)
+            if u:
+                urls.append(u)
 
     state["checkin_image_urls"] = urls
+
     # -------------------------
-    # ✅ Resolve tenant_id via Project sheet (ID-first, then fallback triplet)
+    # Resolve tenant_id via Project sheet (prefer legacy_id lookup)
     # -------------------------
-    tenant_id = _norm_value(str(state.get("tenant_id") or ""))  # may be pre-set by meta override
+    tenant_id = _norm_value(state.get("tenant_id") or "")
     project_row = None
 
     if not tenant_id:
-        # 1) ID-first: match Project.ID (legacy_id) (same as history_ingest approach)
         if legacy_id:
-            try:
-                projects = sheets.list_projects()
-                k_p_legacy = _key(sheets.map.col("project", "legacy_id"))
-                for pr in projects:
-                    pid = _norm_value((pr or {}).get(k_p_legacy, ""))
-                    if pid and _key(pid) == _key(str(legacy_id)):
-                        project_row = pr
-                        break
-            except Exception:
-                project_row = None
+            project_row = lc_invoke(
+                reg,
+                "sheets_get_project_by_legacy_id",
+                {"legacy_id": str(legacy_id)},
+                state,
+                default=None,
+            )
 
-        # 2) Fallback: original triplet lookup
         if not project_row and project_name and part_number and legacy_id:
-            project_row = sheets.get_project_row(project_name, part_number, legacy_id)
+            project_row = lc_invoke(
+                reg,
+                "sheets_get_project_row_triplet",
+                {"project_name": project_name, "part_number": part_number, "legacy_id": legacy_id},
+                state,
+                default=None,
+            )
 
         if project_row:
-            k_tenant = _key(sheets.map.col("project", "company_row_id"))
-            tenant_id = _norm_value(project_row.get(k_tenant, ""))
+            col_tenant = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "company_row_id"}, state, default="")
+            tenant_id = _norm_value(project_row.get(_key(col_tenant), ""))
 
             # Fill missing values from project row (nice-to-have)
-            try:
-                k_pname = _key(sheets.map.col("project", "project_name"))
-                k_ppart = _key(sheets.map.col("project", "part_number"))
-                if not project_name:
-                    project_name = _norm_value(project_row.get(k_pname, ""))
-                if not part_number:
-                    part_number = _norm_value(project_row.get(k_ppart, ""))
-                state["project_name"] = project_name or None
-                state["part_number"] = part_number or None
-            except Exception:
-                pass
+            col_pname = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "project_name"}, state, default="")
+            col_ppart = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "part_number"}, state, default="")
+            if not project_name and col_pname:
+                project_name = _norm_value(project_row.get(_key(col_pname), ""))
+            if not part_number and col_ppart:
+                part_number = _norm_value(project_row.get(_key(col_ppart), ""))
+            state["project_name"] = project_name or None
+            state["part_number"] = part_number or None
 
     state["project_row"] = project_row
     state["tenant_id"] = tenant_id or None
 
     convo_rows = []
     if checkin_id:
-        convo_rows = sheets.get_conversations_for_checkin(str(checkin_id))
+        convo_rows = lc_invoke(
+            reg,
+            "sheets_get_conversations_for_checkin",
+            {"checkin_id": str(checkin_id)},
+            state,
+            default=[],
+        ) or []
     state["conversation_rows"] = convo_rows
 
-    # Closure memory candidates from conversation
     state["closure_notes"] = _extract_closure_notes(convo_rows)
 
-    # ✅ Company routing (Phase 2 requirement)
-    # 1) Derive from PROJECT NAME (this is your source of truth for Teams channel grouping)
-    # 2) If Glide is configured + returns a real name, override (optional enhancement)
+    # -------------------------
+    # Company routing + description fallback (via tools)
+    # -------------------------
     state["company_name"] = None
     state["company_description"] = None
     state["company_key"] = None
 
     try:
-        ct = CompanyTool(settings)
-
-        # Fallback-from-project: always attempt
-        proj_ctx = ct.from_project_name(project_name or "", tenant_row_id=tenant_id or "")
+        proj_ctx = lc_invoke(
+            reg,
+            "company_from_project_name",
+            {"project_name": project_name or "", "tenant_row_id": tenant_id or ""},
+            state,
+            default=None,
+        )
         if proj_ctx:
-            state["company_name"] = proj_ctx.company_name or None
-            state["company_key"] = proj_ctx.company_key or None
+            state["company_name"] = proj_ctx.get("company_name") or None
+            state["company_key"] = proj_ctx.get("company_key") or None
             state["company_description"] = None
-            (state.get("logs") or []).append(
-                f"Derived company from project_name: company='{proj_ctx.company_name}' key='{proj_ctx.company_key}'"
+            state.setdefault("logs", []).append(
+                f"Derived company from project_name: company='{state['company_name']}' key='{state['company_key']}'"
             )
 
-        # Glide override (only if tenant_id exists and Glide returns a real company name)
         if tenant_id:
-            glide_ctx = ct.get_company_context(tenant_id)
-            if glide_ctx and (glide_ctx.company_name or "").strip():
-                state["company_name"] = glide_ctx.company_name or state["company_name"]
-                state["company_description"] = glide_ctx.company_description or None
-                state["company_key"] = glide_ctx.company_key or state["company_key"]
-                (state.get("logs") or []).append(
-                    f"Loaded company context via Glide (override): name='{glide_ctx.company_name}' key='{glide_ctx.company_key}'"
-                )
-
-        # If we still don't have a key but we have a name, set a stable fallback
-        if not state.get("company_key") and state.get("company_name"):
-            # last resort: slug-like key using CompanyTool helper via from_project_name
-            proj_ctx2 = ct.from_project_name(state["company_name"], tenant_row_id=tenant_id or "")
-            if proj_ctx2:
-                state["company_key"] = proj_ctx2.company_key or None
-
-    except Exception as e:
-        (state.get("logs") or []).append(f"Company routing build failed (non-fatal): {e}")
-
-    # -------------------------
-    # ✅ Company description fallback (DB cache -> Glide -> embed -> vectors)
-    # -------------------------
-    try:
-        tenant_row_id = (state.get("tenant_id") or "").strip()
-        cur_desc = (state.get("company_description") or "").strip()
-
-        if tenant_row_id and not cur_desc:
-            cache = CompanyCacheTool(settings)
-            cached = cache.get(tenant_row_id)
-            if cached and (cached.get("company_description") or "").strip():
-                state["company_description"] = (cached.get("company_description") or "").strip()
-                (state.get("logs") or []).append("Loaded company_description from Postgres cache")
-
-        # Still missing? fetch from Glide once and cache it.
-        cur_desc = (state.get("company_description") or "").strip()
-        if tenant_row_id and not cur_desc:
-            ct = CompanyTool(settings)
-            glide_ctx = ct.get_company_context(tenant_row_id)
-            if glide_ctx and (glide_ctx.company_description or "").strip():
-                state["company_description"] = (glide_ctx.company_description or "").strip()
-                state["company_name"] = glide_ctx.company_name or state.get("company_name")
-                state["company_key"] = glide_ctx.company_key or state.get("company_key")
-
-                # persist cache
-                cache = CompanyCacheTool(settings)
-                cache.upsert(
-                    tenant_row_id=tenant_row_id,
-                    company_name=(state.get("company_name") or ""),
-                    company_description=(state.get("company_description") or ""),
-                    raw={"source": "glide_fallback"},
-                    source="glide",
-                )
-                (state.get("logs") or []).append("Fetched company_description from Glide and cached to Postgres")
-
-        # If we have description now: embed + upsert company vector
-        desc_final = (state.get("company_description") or "").strip()
-        if tenant_row_id and desc_final:
-            company_name = (state.get("company_name") or "").strip()
-            embedder = EmbedTool(settings)
-            vdb = VectorTool(settings)
-            emb = embedder.embed_text(f"Company: {company_name}\n{desc_final}")
-            vdb.upsert_company_profile(
-                tenant_row_id=tenant_row_id,
-                company_name=company_name,
-                company_description=desc_final,
-                embedding=emb,
+            glide_ctx = lc_invoke(
+                reg,
+                "company_get_company_context",
+                {"tenant_row_id": tenant_id},
+                state,
+                default=None,
             )
-            (state.get("logs") or []).append("Upserted company profile vector (company_vectors)")
-    except Exception as e:
-        (state.get("logs") or []).append(f"Company description fallback/embed failed (non-fatal): {e}")
+            if glide_ctx and (glide_ctx.get("company_name") or "").strip():
+                state["company_name"] = glide_ctx.get("company_name") or state["company_name"]
+                state["company_description"] = glide_ctx.get("company_description") or None
+                state["company_key"] = glide_ctx.get("company_key") or state["company_key"]
+                state.setdefault("logs", []).append(
+                    f"Loaded company context via Glide (override): name='{state['company_name']}' key='{state['company_key']}'"
+                )
 
-    (state.get("logs") or []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes + company routing")
+        tenant_row_id = (state.get("tenant_id") or "").strip()
+        desc_final = (state.get("company_description") or "").strip()
+        company_name_final = (state.get("company_name") or "").strip()
+
+        if tenant_row_id and desc_final:
+            emb = lc_invoke(
+                reg,
+                "embed_text",
+                {"text": f"Company: {company_name_final}\n{desc_final}"},
+                state,
+                fatal=True,
+            )
+            lc_invoke(
+                reg,
+                "vector_upsert_company_profile",
+                {
+                    "tenant_row_id": tenant_row_id,
+                    "company_name": company_name_final,
+                    "company_description": desc_final,
+                    "embedding": emb,
+                },
+                state,
+                fatal=False,
+            )
+            state.setdefault("logs", []).append("Upserted company profile vector (company_vectors) via LC tools")
+    except Exception as e:
+        state.setdefault("logs", []).append(f"Company routing build failed (non-fatal): {e}")
+
+    state.setdefault("logs", []).append("Loaded sheet data (checkin/project/conversation) + extracted closure notes + company routing")
     return state

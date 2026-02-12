@@ -108,11 +108,36 @@ def health(request: Request) -> dict:
 
 
 @app.post("/admin/trigger")
-def admin_trigger(request: Request, payload: WebhookPayload):
+def admin_trigger(request: Request, payload: WebhookPayload, async_run: bool = False):
+    """
+    Admin trigger for manual testing.
+    - async_run=False: run synchronously in web process (debug/local)
+    - async_run=True: enqueue to RQ (prod recommended)
+    """
     settings = _get_settings(request)
-    result = run_event_graph(settings, payload.model_dump(exclude_none=True))
-    return {"ok": True, "result": result}
+    p = payload.model_dump(exclude_none=True)
 
+    if async_run:
+        from .worker_tasks import enqueue_event_task
+        out = enqueue_event_task(p, queue_name=(settings.consumer_queues or "default").split(",")[0].strip() or "default")
+        return {"ok": True, "enqueued": True, "job": out}
+
+    result = run_event_graph(settings, p)
+    return {"ok": True, "enqueued": False, "result": result}
+
+@app.post("/admin/enqueue")
+def admin_enqueue(request: Request, payload: WebhookPayload, queue: str = "default"):
+    """
+    Strict enqueue endpoint (no sync path).
+    Useful for production + load testing without blocking the web worker.
+    """
+    settings = _get_settings(request)
+    from .worker_tasks import enqueue_event_task
+
+    p = payload.model_dump(exclude_none=True)
+    q = (queue or "").strip() or (settings.consumer_queues or "default").split(",")[0].strip() or "default"
+    out = enqueue_event_task(p, queue_name=q)
+    return {"ok": True, "job": out}
 
 @app.post("/admin/migrate")
 def admin_migrate(request: Request):

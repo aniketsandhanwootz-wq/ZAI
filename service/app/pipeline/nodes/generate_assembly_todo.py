@@ -1,3 +1,4 @@
+# service/app/pipeline/nodes/generate_assembly_todo.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,18 +7,22 @@ import re
 from datetime import datetime, date
 import json
 import hashlib
-import secrets
 import string
 
 from ...config import Settings
-from ...tools.sheets_tool import SheetsTool, _key, _norm_value
-from ...tools.llm_tool import LLMTool
-from ...tools.embed_tool import EmbedTool
-from ...tools.vector_tool import VectorTool
 from .rerank_context import rerank_context
-from ...integrations.appsheet_client import AppSheetClient
 
+from ..lc_runtime import lc_registry, lc_invoke
 
+def _norm_value(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x.strip()
+    return str(x).strip()
+
+def _key(s: Any) -> str:
+    return re.sub(r"\s+", " ", _norm_value(s)).strip().lower()
 # -------------------------
 # Prompt loader (ONLY zai_cues_10.md)
 # -------------------------
@@ -32,13 +37,11 @@ def _find_repo_root(start: Path) -> Path:
         p = p.parent
     return start
 
-
 def _load_prompt_file(name: str) -> str:
     here = Path(__file__).resolve()
-    root = _find_repo_root(here.parent.parent.parent.parent)  # nodes -> pipeline -> app -> service -> repo
+    root = _find_repo_root(here.parent.parent.parent.parent)
     path = root / "packages" / "prompts" / name
     return path.read_text(encoding="utf-8")
-
 
 def _load_zai_cues_prompt() -> str:
     return _load_prompt_file("zai_cues_10.md")
@@ -50,9 +53,7 @@ def _load_zai_cues_prompt() -> str:
 
 _ALPHANUM = string.ascii_letters + string.digits
 
-
 def _now_timestamp_str() -> str:
-    # Match sheet style like: 01/07/26 12:49 PM
     try:
         from zoneinfo import ZoneInfo
         dt = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -60,59 +61,40 @@ def _now_timestamp_str() -> str:
         dt = datetime.now()
     return dt.strftime("%m/%d/%y %I:%M %p")
 
-
 def _slot_cue_id(*, tenant_id: str, legacy_id: str, slot: int) -> str:
-    """
-    Stable slot IDs: always 10 rows per legacy_id.
-    Every trigger updates same 10 rows (no accumulation).
-    """
     base = f"{tenant_id}|{legacy_id}|ZAI_CUE_SLOT_V1|{int(slot)}"
     return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
-
 
 def _clamp_10_words(line: str) -> str:
     w = [x for x in re.split(r"\s+", (line or "").strip()) if x]
     w = w[:10]
     return " ".join(w).strip()
 
-
 def _parse_date_loose(s: str) -> Optional[date]:
     s = (s or "").strip()
     if not s:
         return None
-
     for fmt in (
-        "%Y-%m-%d",
-        "%Y/%m/%d",
-        "%d-%m-%Y",
-        "%m-%d-%Y",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-        "%d-%m-%Y %H:%M:%S",
-        "%m-%d-%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M:%S",
-        "%m/%d/%Y %H:%M:%S",
+        "%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y",
+        "%d/%m/%Y", "%m/%d/%Y",
+        "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S", "%m-%d-%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
     ):
         try:
             return datetime.strptime(s, fmt).date()
         except Exception:
             pass
-
     try:
         if "T" in s:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except Exception:
         pass
-
     return None
-
 
 _STAGE_KEYWORDS_EARLY = re.compile(r"\b(raw|rm|sheet|plate|laser|cut|cutting|bend|bending|burr|scratch)\b", re.I)
 _STAGE_KEYWORDS_MID = re.compile(r"\b(fabric|weld|welding|fitup|fixture|jig|grind|grinding|distort|spatter|undercut)\b", re.I)
 _STAGE_KEYWORDS_LATE = re.compile(r"\b(paint|powder|coat|coating|finish|assembly|dispatch|packing|mask|thread|torque)\b", re.I)
-
 
 def _infer_stage(*, dispatch_date_str: str, recent_text_blob: str) -> str:
     dd = _parse_date_loose(dispatch_date_str)
@@ -124,7 +106,6 @@ def _infer_stage(*, dispatch_date_str: str, recent_text_blob: str) -> str:
         if 4 <= days_left < 14:
             return f"Mid Stage (time remaining ~{days_left}d)"
         return f"Late Stage (time remaining ~{days_left}d)"
-
     blob = (recent_text_blob or "").strip()
     if _STAGE_KEYWORDS_LATE.search(blob):
         return "Late Stage (from recent activity)"
@@ -132,9 +113,7 @@ def _infer_stage(*, dispatch_date_str: str, recent_text_blob: str) -> str:
         return "Mid Stage (from recent activity)"
     if _STAGE_KEYWORDS_EARLY.search(blob):
         return "Early Stage (from recent activity)"
-
     return "Stage unknown (insufficient signals)"
-
 
 def _compact_lines(lines: List[str], max_lines: int) -> str:
     out: List[str] = []
@@ -147,15 +126,9 @@ def _compact_lines(lines: List[str], max_lines: int) -> str:
             break
     return "\n".join(out).strip()
 
-
-def _fmt_recent_activity(*, related_checkins: List[Dict[str, Any]], sheets: SheetsTool) -> str:
+def _fmt_recent_activity(*, related_checkins: List[Dict[str, Any]], k_ci_status: str, k_ci_desc: str, k_ci_id: str) -> str:
     if not related_checkins:
         return "(no recent checkins found)"
-
-    k_ci_status = _key(sheets.map.col("checkin", "status"))
-    k_ci_desc = _key(sheets.map.col("checkin", "description"))
-    k_ci_id = _key(sheets.map.col("checkin", "checkin_id"))
-
     lines: List[str] = []
     for c in related_checkins[-6:]:
         cid = _norm_value((c or {}).get(k_ci_id, ""))
@@ -166,9 +139,7 @@ def _fmt_recent_activity(*, related_checkins: List[Dict[str, Any]], sheets: Shee
             s = f"{s} (checkin_id={cid})".strip()
         if s:
             lines.append("- " + s)
-
     return _compact_lines(lines, 12) or "(no usable recent activity)"
-
 
 def _fmt_process_material(*, project_name: str, part_number: str, company_profile_text: str) -> str:
     lines: List[str] = []
@@ -183,7 +154,6 @@ def _fmt_process_material(*, project_name: str, part_number: str, company_profil
         lines.append(f"Client context: {cp}")
     return " | ".join(lines).strip() if lines else "(unknown)"
 
-
 def _parse_json_loose(s: str) -> dict:
     s = (s or "").strip()
     if not s:
@@ -196,7 +166,6 @@ def _parse_json_loose(s: str) -> dict:
         return json.loads(s)
     except Exception:
         return {}
-
 
 def _split_lines_fallback(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
@@ -212,10 +181,9 @@ def _split_lines_fallback(text: str, max_items: int = 10) -> List[str]:
             break
     return out[:max_items]
 
-
 def _generate_10_cues_from_context(
     *,
-    llm: LLMTool,
+    llm_text_fn,
     stage: str,
     packed_context: str,
     process_material: str,
@@ -226,26 +194,20 @@ def _generate_10_cues_from_context(
     closure_notes: str = "",
     attachment_context: str = "",
 ) -> List[str]:
-    """
-    Uses packages/prompts/zai_cues_10.md
-    HARD REQ: returns exactly 10 strings (<=10 words each), deduped.
-    """
     tmpl = _load_zai_cues_prompt()
-
     prompt = (
         tmpl.replace("{stage}", stage or "N/A")
         .replace("{packed_context}", packed_context or "N/A")
         .replace("{process_material}", process_material or "N/A")
         .replace("{recent_activity}", recent_activity or "N/A")
         .replace("{previous_chips}", previous_chips or "N/A")
-        # extra placeholders (safe even if not present in file)
         .replace("{company_context}", company_context or "N/A")
         .replace("{snapshot}", snapshot or "N/A")
         .replace("{closure_notes}", closure_notes or "N/A")
         .replace("{attachment_context}", attachment_context or "N/A")
     )
 
-    raw = llm.generate_text(prompt)
+    raw = str(llm_text_fn(prompt) or "").strip()
 
     cues: List[str] = []
     obj = _parse_json_loose(raw)
@@ -290,68 +252,54 @@ def _generate_10_cues_from_context(
 
     return out[:10]
 
-
 def _project_chips_from_10(cues10: List[str]) -> str:
     cues10 = [c for c in (cues10 or []) if (c or "").strip()]
     if not cues10:
         return ""
-    picked = cues10[:3]
-    if len(cues10) >= 4:
-        picked = cues10[:4]
+    picked = cues10[:4] if len(cues10) >= 4 else cues10[:3]
     return "\n".join([_clamp_10_words(x) for x in picked]).strip()
-
 
 def _is_mfg(status: str) -> bool:
     return (status or "").strip().lower() == "mfg"
 
 
-# -------------------------
-# Main node
-# -------------------------
-
 def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     payload = state.get("payload") or {}
     legacy_id = _norm_value(payload.get("legacy_id") or state.get("legacy_id") or "")
     if not legacy_id:
-        (state.get("logs") or []).append("assembly_todo: missing legacy_id; skipped")
+        state.setdefault("logs", []).append("assembly_todo: missing legacy_id; skipped")
         state["assembly_todo_skipped"] = True
         return state
 
-    sheets = SheetsTool(settings)
+    reg = lc_registry(settings, state)
 
-    pr = sheets.get_project_by_legacy_id(legacy_id)
-    if not pr:
-        (state.get("logs") or []).append(f"assembly_todo: project row not found for legacy_id={legacy_id}; skipped")
+    pr = lc_invoke(reg, "sheets_get_project_by_legacy_id", {"legacy_id": legacy_id}, state, default=None)
+    if not isinstance(pr, dict) or not pr:
+        state.setdefault("logs", []).append(f"assembly_todo: project row not found for legacy_id={legacy_id}; skipped")
         state["assembly_todo_skipped"] = True
         return state
 
-    k_status = _key(sheets.map.col("project", "status_assembly"))
-    status_val = _norm_value(pr.get(k_status, ""))
+    col_status = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "status_assembly"}, state, default="")
+    status_val = _norm_value(pr.get(_key(col_status), "")) if col_status else ""
     if not _is_mfg(status_val):
-        (state.get("logs") or []).append(f"assembly_todo: status_assembly='{status_val}' != 'mfg'; skipped")
+        state.setdefault("logs", []).append(f"assembly_todo: status_assembly='{status_val}' != 'mfg'; skipped")
         state["assembly_todo_skipped"] = True
         return state
 
-    k_pname = _key(sheets.map.col("project", "project_name"))
-    k_part = _key(sheets.map.col("project", "part_number"))
-    k_tenant = _key(sheets.map.col("project", "company_row_id"))
-    k_prev = _key(sheets.map.col("project", "ai_critcal_point"))
+    col_pname = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "project_name"}, state, default="")
+    col_part = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "part_number"}, state, default="")
+    col_tenant = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "company_row_id"}, state, default="")
+    col_prev = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "ai_critcal_point"}, state, default="")
+    col_dispatch = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "dispatch_date"}, state, default="")
 
-    try:
-        k_dispatch = _key(sheets.map.col("project", "dispatch_date"))
-    except Exception:
-        k_dispatch = ""
-
-    project_name = _norm_value(pr.get(k_pname, ""))
-    part_number = _norm_value(pr.get(k_part, ""))
-    tenant_id = _norm_value(pr.get(k_tenant, ""))
-    previous_chips = _norm_value(pr.get(k_prev, ""))
-    dispatch_date_str = _norm_value(pr.get(k_dispatch, "")) if k_dispatch else ""
+    project_name = _norm_value(pr.get(_key(col_pname), "")) if col_pname else ""
+    part_number = _norm_value(pr.get(_key(col_part), "")) if col_part else ""
+    tenant_id = _norm_value(pr.get(_key(col_tenant), "")) if col_tenant else ""
+    previous_chips = _norm_value(pr.get(_key(col_prev), "")) if col_prev else ""
+    dispatch_date_str = _norm_value(pr.get(_key(col_dispatch), "")) if col_dispatch else ""
 
     if not tenant_id:
-        (state.get("logs") or []).append(
-            f"assembly_todo: missing tenant_id(company_row_id) for legacy_id={legacy_id}; skipped"
-        )
+        state.setdefault("logs", []).append(f"assembly_todo: missing tenant_id(company_row_id) for legacy_id={legacy_id}; skipped")
         state["assembly_todo_skipped"] = True
         return state
 
@@ -364,70 +312,47 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
         f"Output should be 10 cues, shopfloor style."
     ).strip()
 
-    embedder = EmbedTool(settings)
-    vector_db = VectorTool(settings)
+    q = lc_invoke(reg, "embed_query", {"text": query_text}, state, fatal=True)
 
-    try:
-        q = embedder.embed_query(query_text)
-    except Exception as e:
-        (state.get("logs") or []).append(f"assembly_todo: embed_query failed: {e}")
-        state["assembly_todo_skipped"] = True
-        return state
-
-    problems = vector_db.search_incidents(
-        tenant_id=tenant_id,
-        query_embedding=q,
-        top_k=80,
-        project_name=project_name or None,
-        part_number=part_number or None,
-        legacy_id=legacy_id,
-        vector_type="PROBLEM",
-    )
-    resolutions = vector_db.search_incidents(
-        tenant_id=tenant_id,
-        query_embedding=q,
-        top_k=80,
-        project_name=project_name or None,
-        part_number=part_number or None,
-        legacy_id=legacy_id,
-        vector_type="RESOLUTION",
-    )
-    media = vector_db.search_incidents(
-        tenant_id=tenant_id,
-        query_embedding=q,
-        top_k=60,
-        project_name=project_name or None,
-        part_number=part_number or None,
-        legacy_id=legacy_id,
-        vector_type="MEDIA",
-    )
-    ccp = vector_db.search_ccp_chunks(
-        tenant_id=tenant_id,
-        query_embedding=q,
-        top_k=60,
-        project_name=project_name or None,
-        part_number=part_number or None,
-        legacy_id=legacy_id,
-    )
-    dash = vector_db.search_dashboard_updates(
-        tenant_id=tenant_id,
-        query_embedding=q,
-        top_k=30,
-        project_name=project_name or None,
-        part_number=part_number or None,
-        legacy_id=legacy_id,
-    )
+    problems = lc_invoke(
+        reg, "vector_search_incidents",
+        {"tenant_id": tenant_id, "query_embedding": q, "top_k": 80, "project_name": project_name or None, "part_number": part_number or None, "legacy_id": legacy_id, "vector_type": "PROBLEM"},
+        state, default=[]
+    ) or []
+    resolutions = lc_invoke(
+        reg, "vector_search_incidents",
+        {"tenant_id": tenant_id, "query_embedding": q, "top_k": 80, "project_name": project_name or None, "part_number": part_number or None, "legacy_id": legacy_id, "vector_type": "RESOLUTION"},
+        state, default=[]
+    ) or []
+    media = lc_invoke(
+        reg, "vector_search_incidents",
+        {"tenant_id": tenant_id, "query_embedding": q, "top_k": 60, "project_name": project_name or None, "part_number": part_number or None, "legacy_id": legacy_id, "vector_type": "MEDIA"},
+        state, default=[]
+    ) or []
+    ccp = lc_invoke(
+        reg, "vector_search_ccp_chunks",
+        {"tenant_id": tenant_id, "query_embedding": q, "top_k": 60, "project_name": project_name or None, "part_number": part_number or None, "legacy_id": legacy_id},
+        state, default=[]
+    ) or []
+    dash = lc_invoke(
+        reg, "vector_search_dashboard_updates",
+        {"tenant_id": tenant_id, "query_embedding": q, "top_k": 30, "project_name": project_name or None, "part_number": part_number or None, "legacy_id": legacy_id},
+        state, default=[]
+    ) or []
 
     company_profile_text = ""
-    try:
-        row = vector_db.get_company_profile_by_tenant_row_id(tenant_row_id=tenant_id)
-        if row:
-            company_profile_text = (
-                f"Company: {row.get('company_name','')}\n"
-                f"Client description: {row.get('company_description','')}"
-            ).strip()
-    except Exception as e:
-        (state.get("logs") or []).append(f"assembly_todo: company profile retrieval failed (non-fatal): {e}")
+    row = lc_invoke(
+        reg,
+        "vector_get_company_profile_by_tenant_row_id",
+        {"tenant_row_id": tenant_id},
+        state,
+        default=None,
+    )
+    if isinstance(row, dict) and row:
+        company_profile_text = (
+            f"Company: {row.get('company_name','')}\n"
+            f"Client description: {row.get('company_description','')}"
+        ).strip()
 
     tmp_state = {
         "thread_snapshot_text": query_text,
@@ -442,14 +367,28 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     tmp_state = rerank_context(settings, tmp_state)
     packed_context = _norm_value(tmp_state.get("packed_context", ""))
 
-    k_ci_legacy = _key(sheets.map.col("checkin", "legacy_id"))
-    all_checkins = sheets.list_checkins()
+    all_checkins = lc_invoke(reg, "sheets_list_checkins", {}, state, default=[]) or []
+    col_ci_legacy = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "legacy_id"}, state, default="")
+    col_ci_status = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "status"}, state, default="")
+    col_ci_desc = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "description"}, state, default="")
+    col_ci_id = lc_invoke(reg, "sheets_map_col", {"table": "checkin", "field": "checkin_id"}, state, default="")
+
+    k_ci_legacy = _key(col_ci_legacy) if col_ci_legacy else ""
+    k_ci_status = _key(col_ci_status) if col_ci_status else ""
+    k_ci_desc = _key(col_ci_desc) if col_ci_desc else ""
+    k_ci_id = _key(col_ci_id) if col_ci_id else ""
+
     related_checkins = [
         c for c in (all_checkins or [])
-        if _key(_norm_value((c or {}).get(k_ci_legacy, ""))) == _key(legacy_id)
+        if k_ci_legacy and _key(_norm_value((c or {}).get(k_ci_legacy, ""))) == _key(legacy_id)
     ]
     related_checkins = related_checkins[-10:]
-    recent_activity = _fmt_recent_activity(related_checkins=related_checkins, sheets=sheets)
+    recent_activity = _fmt_recent_activity(
+        related_checkins=related_checkins,
+        k_ci_status=k_ci_status,
+        k_ci_desc=k_ci_desc,
+        k_ci_id=k_ci_id,
+    )
 
     recent_blob = f"{dispatch_date_str}\n{recent_activity}\n{packed_context}"
     stage = _infer_stage(dispatch_date_str=dispatch_date_str, recent_text_blob=recent_blob)
@@ -460,10 +399,11 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
         company_profile_text=company_profile_text,
     )
 
-    llm = LLMTool(settings)
+    def _llm_text(prompt: str) -> str:
+        return str(lc_invoke(reg, "llm_generate_text", {"prompt": prompt}, state, fatal=True) or "")
 
     cues10 = _generate_10_cues_from_context(
-        llm=llm,
+        llm_text_fn=_llm_text,
         stage=stage,
         packed_context=packed_context,
         process_material=process_material,
@@ -477,8 +417,14 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
 
     chips = _project_chips_from_10(cues10)
 
-    col_out = sheets.map.col("project", "ai_critcal_point")
-    ok = sheets.update_project_cell_by_legacy_id(legacy_id, column_name=col_out, value=chips)
+    col_out = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "ai_critcal_point"}, state, default="")
+    ok = lc_invoke(
+        reg,
+        "sheets_update_project_cell_by_legacy_id",
+        {"legacy_id": legacy_id, "column_name": col_out, "value": chips},
+        state,
+        default=False,
+    )
 
     state["assembly_todo_written"] = bool(ok)
     state["assembly_todo_skipped"] = False
@@ -487,26 +433,27 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     state["assembly_todo_cues10"] = cues10
 
     if ok:
-        (state.get("logs") or []).append(f"assembly_todo: wrote chips to Project.ai_critcal_point legacy_id={legacy_id}")
+        state.setdefault("logs", []).append(f"assembly_todo: wrote chips to Project.ai_critcal_point legacy_id={legacy_id}")
     else:
-        (state.get("logs") or []).append(f"assembly_todo: FAILED writeback to Project.ai_critcal_point legacy_id={legacy_id}")
+        state.setdefault("logs", []).append(f"assembly_todo: FAILED writeback to Project.ai_critcal_point legacy_id={legacy_id}")
 
-    # Sync same 10 cues into AppSheet (replace/update same 10 slots)
+    # AppSheet cues sync (replace/update same 10 slots)
     try:
-        client = AppSheetClient(settings)
-        if client.enabled() and cues10:
+        if cues10:
             generated_at = _now_timestamp_str()
             cue_items = [
                 {"cue_id": _slot_cue_id(tenant_id=tenant_id, legacy_id=legacy_id, slot=i), "cue": cues10[i - 1]}
                 for i in range(1, 11)
             ]
-            client.upsert_cues_rows(
-                legacy_id=legacy_id,
-                cue_items=cue_items,
-                generated_at=generated_at,
+            lc_invoke(
+                reg,
+                "appsheet_upsert_cues_rows",
+                {"legacy_id": legacy_id, "cue_items": cue_items, "generated_at": generated_at},
+                state,
+                default=None,
             )
-            (state.get("logs") or []).append(f"appsheet_cues: upserted=10 legacy_id={legacy_id}")
+            state.setdefault("logs", []).append(f"appsheet_cues: upserted=10 legacy_id={legacy_id}")
     except Exception as e:
-        (state.get("logs") or []).append(f"appsheet_cues: non-fatal failure: {e}")
+        state.setdefault("logs", []).append(f"appsheet_cues: non-fatal failure: {e}")
 
     return state

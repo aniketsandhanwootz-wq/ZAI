@@ -548,7 +548,7 @@ def ingest_rows(
                         "table": spec.table_name,
                         "row_id": row_id,
                         "tenant_id": tenant_id,
-                        "error": str(e)[:400],
+                        "error": "Row processing failed"
                     }
                 )
 
