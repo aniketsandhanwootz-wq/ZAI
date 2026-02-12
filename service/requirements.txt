@@ -30,7 +30,13 @@ langsmith==0.4.29
 
 # PDFs + imaging
 pypdf==6.7.0
-Pillow==12.1.0
+
+Pillow==12.1.1
+
+# Google Auth libraries
+google-auth-oauthlib==1.2.4
+google-auth-httplib2==0.3.0
+
 pymupdf
 
 # Excel

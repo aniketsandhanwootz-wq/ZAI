@@ -7,12 +7,15 @@ from typing import Any, Callable, Dict, Iterator, Optional, TypeVar
 
 T = TypeVar("T")
 
-
 def _is_settings_like(x: Any) -> bool:
     return hasattr(x, "__class__") and x.__class__.__name__ == "Settings"
 
 
 def _scrub_settings(x: Any) -> Dict[str, Any]:
+    """
+    Prevent huge/secret Settings from being sent to LangSmith.
+    Keep only non-sensitive debugging fields.
+    """
     try:
         return {
             "llm_provider": getattr(x, "llm_provider", None),
@@ -30,6 +33,9 @@ def _scrub_settings(x: Any) -> Dict[str, Any]:
 
 
 def _scrub_state(x: Any) -> Any:
+    """
+    Keep state small; avoid uploading images/base64/huge payloads.
+    """
     if not isinstance(x, dict):
         return x
     keep_keys = {
@@ -47,8 +53,11 @@ def _scrub_state(x: Any) -> Any:
         "writeback_done",
         "logs",
     }
-    out: Dict[str, Any] = {k: x.get(k) for k in keep_keys if k in x}
-
+    out: Dict[str, Any] = {}
+    for k in keep_keys:
+        if k in x:
+            out[k] = x.get(k)
+    # payload is often huge; keep only a minimal view
     payload = x.get("payload")
     if isinstance(payload, dict):
         out["payload"] = {
@@ -64,6 +73,10 @@ def _scrub_state(x: Any) -> Any:
 
 
 def _safe_process_inputs(args: Any, kwargs: Any) -> Dict[str, Any]:
+    """
+    LangSmith 'traceable' supports process_inputs in many versions.
+    We normalize args/kwargs into a safe dict.
+    """
     safe_args: list[Any] = []
     for a in list(args or []):
         if _is_settings_like(a):
@@ -73,6 +86,7 @@ def _safe_process_inputs(args: Any, kwargs: Any) -> Dict[str, Any]:
         else:
             safe_args.append(a)
 
+    # kwargs can be large too; keep as-is but scrub obvious state/settings
     safe_kwargs: Dict[str, Any] = {}
     for k, v in (kwargs or {}).items():
         if _is_settings_like(v):
@@ -81,7 +95,6 @@ def _safe_process_inputs(args: Any, kwargs: Any) -> Dict[str, Any]:
             safe_kwargs[k] = _scrub_state(v)
         else:
             safe_kwargs[k] = v
-
     return {"args": safe_args, "kwargs": safe_kwargs}
 
 
@@ -91,6 +104,22 @@ def _safe_process_outputs(out: Any) -> Any:
         return {k: v for k, v in out.items() if k not in banned}
     return out
 
+
+def flush_traces() -> None:
+    """
+    Force flush in long-running workers/web containers so runs don't remain 'running' in UI.
+    Safe no-op if not supported.
+    """
+    
+    if not enabled():
+        return
+    try:
+        import langsmith as ls  # type: ignore
+        Client = getattr(ls, "Client", None)
+        if Client:
+            Client().flush()
+    except Exception:
+        pass
 
 def _truthy(v: str) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "y", "on")
@@ -123,8 +152,9 @@ def _tags_env() -> list[str]:
 
 def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callable[..., T]:
     """
-    Wrap any callable into a LangSmith span.
-    Safe no-op if not enabled or not installed.
+    Wrap any function into a LangSmith span, if tracing is enabled.
+    Sanitizes args/outputs so runs always finalize (prevents spinner / "running" forever).
+    If tracing is disabled OR langsmith isn't installed, returns original fn.
     """
     if not enabled():
         return fn

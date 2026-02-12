@@ -440,6 +440,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         }
 
     finally:
+        # Ensure LangSmith finishes/flushes the root run even in long-running worker/web processes
         try:
             from ..tools.langsmith_trace import flush_traces
             flush_traces()
