@@ -149,9 +149,16 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
                 ok += 1
                 results.append({"row_id": rid, "ok": True, "result": out})
             except Exception as e:
+                # Log full error details server-side, but do not expose them to the client.
                 runlog.error(run_id, str(e))
                 err += 1
-                results.append({"row_id": rid, "ok": False, "error": str(e)[:500]})
+                results.append(
+                    {
+                        "row_id": rid,
+                        "ok": False,
+                        "error": f"Internal error while processing {table_key} row",
+                    }
+                )
 
     return {
         "ok": err == 0,
