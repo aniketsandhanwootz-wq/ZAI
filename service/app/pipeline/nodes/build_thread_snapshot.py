@@ -1,3 +1,4 @@
+# service/app/pipeline/nodes/build_tread_snapshot.py
 from __future__ import annotations
 
 from typing import Dict, List
@@ -21,13 +22,11 @@ def _looks_like_closure_line(text: str) -> bool:
         return False
     return any(h in t for h in _CLOSURE_HINTS)
 
-
 def _looks_like_evidence_line(text: str) -> bool:
     t = (text or "").strip().lower()
     if not t:
         return False
     return any(h in t for h in _EVIDENCE_HINTS)
-
 
 def _extract_closure_notes(convos: List[Dict[str, str]]) -> str:
     """
@@ -43,7 +42,6 @@ def _extract_closure_notes(convos: List[Dict[str, str]]) -> str:
         if not remark:
             continue
 
-        # prioritize PASS/OK/Closed remarks and closure keywords
         is_passish = st.strip().upper() in ("PASS", "OK", "CLOSED", "DONE", "RESOLVED")
         if is_passish or _looks_like_closure_line(remark) or _looks_like_evidence_line(remark):
             tag = f"[{st}] " if st else ""
@@ -56,10 +54,8 @@ def _extract_closure_notes(convos: List[Dict[str, str]]) -> str:
     if not lines:
         return ""
 
-    # keep it compact
     bullets = "\n- " + "\n- ".join(lines)
     return f"Closure notes (from conversation):{bullets}".strip()
-
 
 def build_thread_snapshot(settings, state: Dict[str, any]) -> Dict[str, any]:
     project = state.get("project_name") or ""
@@ -85,9 +81,7 @@ def build_thread_snapshot(settings, state: Dict[str, any]) -> Dict[str, any]:
 
     snapshot = f"{header}\n{body}\n{convo}".strip()
     state["thread_snapshot_text"] = snapshot
-
-    # NEW: closure notes extracted from conversation (factual, heuristic)
     state["closure_notes"] = _extract_closure_notes(convos)
 
-    (state.get("logs") or []).append("Built thread snapshot + closure_notes")
+    state.setdefault("logs", []).append("Built thread snapshot + closure_notes")
     return state

@@ -1,17 +1,15 @@
 # service/app/pipeline/nodes/analyze_attachments.py
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ...config import Settings
-from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
-from ...tools.drive_tool import DriveTool
-from ...tools.db_tool import DBTool
-from ...tools.llm_tool import LLMTool
-from ...tools.vision_tool import VisionTool
+from ...tools.attachment_tool import split_cell_refs
 from ...tools.file_extractors.router import extract_any, sniff_mime, sha256_text, sha256_bytes
+
+from ..lc_runtime import lc_registry, lc_invoke
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -39,14 +37,12 @@ def _find_files_cell(checkin_row: Dict[str, Any]) -> str:
     """
     if not checkin_row:
         return ""
-    # exact match first
     for k in checkin_row.keys():
         if _norm_header(k) == "files":
             v = str(checkin_row.get(k) or "").strip()
             if v:
                 return v
 
-    # fallback set
     candidates = {"files", "file", "attachments", "attachment", "documents", "docs"}
     for k in checkin_row.keys():
         if _norm_header(k) in candidates:
@@ -82,10 +78,11 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
     tenant_id = _norm(str(state.get("tenant_id") or ""))
     checkin_id = _norm(str(state.get("checkin_id") or ""))
 
-    # If we cannot associate to tenant/checkin, skip cleanly
     if not tenant_id or not checkin_id:
         state.setdefault("logs", []).append("analyze_attachments: skip (missing tenant_id/checkin_id)")
         return state
+
+    reg = lc_registry(settings, state)
 
     meta = state.get("meta") or {}
     attachments_only = str(meta.get("attachments_only") or "").strip().lower() in ("1", "true", "yes", "y", "on")
@@ -93,7 +90,6 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
     checkin_row = state.get("checkin_row") or {}
     files_cell = ""
 
-    # Allow explicit override (Swagger calls can pass meta.checkin_files)
     override = meta.get("checkin_files")
     if isinstance(override, list):
         files_cell = "\n".join([str(x).strip() for x in override if str(x).strip()])
@@ -116,13 +112,6 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
         state["attachments_analyzed"] = []
         return state
 
-    drive = DriveTool(settings)
-    resolver = AttachmentResolver(drive)
-    db = DBTool(settings.database_url)
-
-    llm = LLMTool(settings)
-    vision = VisionTool(settings)
-
     prompt_t = _load_prompt_template()
     checkin_ctx = _make_checkin_context(state)
 
@@ -131,74 +120,125 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
     processed = 0
     skipped = 0
 
-    # Hard limit to prevent abuse / runaway
     max_files = int(meta.get("max_files") or 6)
+    max_bytes = int(meta.get("max_bytes") or 15_000_000)
+
+    def _vision_caption(image_bytes: bytes, mime_type: str, context: str = "") -> str:
+        out = lc_invoke(
+            reg,
+            "vision_caption_for_retrieval",
+            {
+                "image_b64": base64.b64encode(image_bytes or b"").decode("utf-8"),
+                "mime_type": mime_type or "image/jpeg",
+                "context_hint": context or "",
+                "model": None,
+            },
+            state,
+            default="",
+        )
+        return str(out or "").strip()
 
     for ref in refs[:max_files]:
-        att = resolver.resolve(ref)
-        if not att:
-            skipped += 1
-            continue
-        max_bytes = int(meta.get("max_bytes") or 15_000_000)
-        b = resolver.fetch_bytes(att, timeout=40, max_bytes=max_bytes)
-        if not b:
-            # store minimal metadata anyway (so we know it failed)
-            sh = sha256_text(att.source_ref)
-            db.upsert_checkin_file_artifact(
-                tenant_id=tenant_id,
-                checkin_id=checkin_id,
-                source_hash=sh,
-                source_ref=att.source_ref,
-                filename=att.name,
-                mime_type=att.mime_type or "",
-                byte_size=0,
-                drive_file_id=att.drive_file_id or "",
-                direct_url=att.direct_url or "",
-                content_hash="",
-                extracted_text="(Download failed.)",
-                extracted_json={"download_failed": True},
-                analysis_json={"matches_checkin": False, "summary": "Download failed.", "confidence": 0.0},
-            )
-            analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": False, "reason": "download_failed"})
+        att = lc_invoke(reg, "attachment_resolve", {"ref": ref}, state, default=None)
+        if not isinstance(att, dict) or not att:
             skipped += 1
             continue
 
-        # Strong idempotency: content hash
-        content_hash = sha256_bytes(b)
-        # Prefer content-based source_hash so same file doesn't duplicate
-        source_hash = content_hash
-
-        if db.checkin_file_artifact_exists(tenant_id=tenant_id, checkin_id=checkin_id, source_hash=source_hash, content_hash=content_hash):
-            analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": True, "skipped": True})
-            skipped += 1
-            continue
-
-        mime = sniff_mime(att.name, att.mime_type or "", b)
-
-        # Extract
-        ex = extract_any(
-            filename=att.name,
-            mime_type=mime,
-            data=b,
-            vision_caption_fn=lambda image_bytes, mime_type, context="": vision.caption_for_retrieval(
-                image_bytes=image_bytes, mime_type=mime_type, context_hint=context
-            ),
+        fetch = lc_invoke(
+            reg,
+            "attachment_fetch_bytes",
+            {
+                "source_ref": att.get("source_ref") or "",
+                "kind": att.get("kind") or "",
+                "name": att.get("name") or "",
+                "mime_type": att.get("mime_type") or "",
+                "is_pdf": bool(att.get("is_pdf")),
+                "is_image": bool(att.get("is_image")),
+                "drive_file_id": att.get("drive_file_id"),
+                "direct_url": att.get("direct_url"),
+                "rel_path": att.get("rel_path"),
+                "timeout": 40,
+                "max_bytes": max_bytes,
+            },
+            state,
+            default=None,
         )
 
-        # LLM analysis (use extracted_text, may be long -> truncate for prompt)
+        if not isinstance(fetch, dict) or not fetch.get("content_b64"):
+            # store minimal metadata anyway (so we know it failed)
+            sh = sha256_text(att.get("source_ref") or "")
+            lc_invoke(
+                reg,
+                "db_upsert_checkin_file_artifact",
+                {
+                    "tenant_id": tenant_id,
+                    "checkin_id": checkin_id,
+                    "source_hash": sh,
+                    "source_ref": att.get("source_ref") or "",
+                    "filename": att.get("name") or "",
+                    "mime_type": att.get("mime_type") or "",
+                    "byte_size": 0,
+                    "drive_file_id": att.get("drive_file_id") or "",
+                    "direct_url": att.get("direct_url") or "",
+                    "content_hash": "",
+                    "extracted_text": "(Download failed.)",
+                    "extracted_json": {"download_failed": True},
+                    "analysis_json": {"matches_checkin": False, "summary": "Download failed.", "confidence": 0.0},
+                },
+                state,
+                default=None,
+            )
+            analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": False, "reason": "download_failed"})
+            skipped += 1
+            continue
+
+        try:
+            b = base64.b64decode(fetch.get("content_b64") or "")
+        except Exception:
+            b = b""
+        if not b:
+            skipped += 1
+            continue
+
+        content_hash = sha256_bytes(b)
+        source_hash = content_hash
+
+        exists = lc_invoke(
+            reg,
+            "db_checkin_file_artifact_exists",
+            {
+                "tenant_id": tenant_id,
+                "checkin_id": checkin_id,
+                "source_hash": source_hash,
+                "content_hash": content_hash,
+            },
+            state,
+            default=False,
+        )
+        if bool(exists):
+            analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": True, "skipped": True})
+            skipped += 1
+            continue
+
+        mime = sniff_mime(att.get("name") or "", att.get("mime_type") or "", b)
+
+        ex = extract_any(
+            filename=att.get("name") or "",
+            mime_type=mime,
+            data=b,
+            vision_caption_fn=lambda image_bytes, mime_type, context="": _vision_caption(image_bytes, mime_type, context),
+        )
+
         attachment_text = (ex.extracted_text or "").strip()
-        if len(attachment_text) > 20000:
-            attachment_text_for_prompt = attachment_text[:20000] + "\n\n[TRUNCATED]"
-        else:
-            attachment_text_for_prompt = attachment_text
+        attachment_text_for_prompt = attachment_text[:20000] + "\n\n[TRUNCATED]" if len(attachment_text) > 20000 else attachment_text
 
         attachment_meta = {
-            "filename": att.name,
+            "filename": att.get("name") or "",
             "mime_type": mime,
             "byte_size": len(b),
-            "source_ref": att.source_ref,
-            "drive_file_id": att.drive_file_id or "",
-            "direct_url": att.direct_url or "",
+            "source_ref": att.get("source_ref") or "",
+            "drive_file_id": att.get("drive_file_id") or "",
+            "direct_url": att.get("direct_url") or "",
             "doc_type": ex.doc_type,
             "extract_meta": ex.meta,
         }
@@ -212,14 +252,18 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
             },
         )
 
-        try:
-            analysis = llm.generate_json_with_images(prompt=prompt, images=[], temperature=0.0)
-        except Exception as e:
+        analysis = lc_invoke(
+            reg,
+            "llm_generate_json_with_images",
+            {"prompt": prompt, "images": [], "temperature": 0.0},
+            state,
+            default=None,
+        )
+        if not isinstance(analysis, dict):
             analysis = {
                 "doc_type": ex.doc_type,
                 "summary": "(LLM analysis failed.)",
                 "matches_checkin": False,
-                "match_reason": str(e)[:160],
                 "mismatches": [],
                 "key_findings": [],
                 "measurements": [],
@@ -228,24 +272,28 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 "confidence": 0.0,
             }
 
-        # Persist
-        db.upsert_checkin_file_artifact(
-            tenant_id=tenant_id,
-            checkin_id=checkin_id,
-            source_hash=source_hash,
-            source_ref=att.source_ref,
-            filename=att.name,
-            mime_type=mime,
-            byte_size=len(b),
-            drive_file_id=att.drive_file_id or "",
-            direct_url=att.direct_url or "",
-            content_hash=content_hash,
-            extracted_text=attachment_text[:120000],  # keep it bounded in DB
-            extracted_json={"doc_type": ex.doc_type, "meta": ex.meta, **(ex.extracted_json or {})},
-            analysis_json=analysis or {},
+        lc_invoke(
+            reg,
+            "db_upsert_checkin_file_artifact",
+            {
+                "tenant_id": tenant_id,
+                "checkin_id": checkin_id,
+                "source_hash": source_hash,
+                "source_ref": att.get("source_ref") or "",
+                "filename": att.get("name") or "",
+                "mime_type": mime,
+                "byte_size": len(b),
+                "drive_file_id": att.get("drive_file_id") or "",
+                "direct_url": att.get("direct_url") or "",
+                "content_hash": content_hash,
+                "extracted_text": attachment_text[:120000],
+                "extracted_json": {"doc_type": ex.doc_type, "meta": ex.meta, **(ex.extracted_json or {})},
+                "analysis_json": analysis or {},
+            },
+            state,
+            default=None,
         )
 
-        # Build reply-context snippet
         summ = str((analysis or {}).get("summary") or "").strip()
         matches = bool((analysis or {}).get("matches_checkin") is True)
         conf = (analysis or {}).get("confidence", None)
@@ -254,7 +302,7 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
             mism = []
         mism = [str(x).strip() for x in mism if str(x).strip()][:4]
 
-        line = f"- File: {att.name} | type={ex.doc_type} | matches={matches}"
+        line = f"- File: {att.get('name') or ''} | type={ex.doc_type} | matches={matches}"
         if conf is not None:
             try:
                 line += f" | confidence={float(conf):.2f}"
@@ -267,7 +315,7 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
 
         ctx_lines.append(line)
 
-        analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": True, "doc_type": ex.doc_type})
+        analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": True, "doc_type": ex.doc_type})
         processed += 1
 
     state["attachments_analyzed"] = analyzed
@@ -277,8 +325,6 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
         f"analyze_attachments: processed={processed} skipped={skipped} max_files={max_files}"
     )
 
-    # If this run is attachments-only backfill, we still want the pipeline to continue normally
-    # but reply/writeback already controlled by graph event_type rules.
     if attachments_only:
         state.setdefault("logs", []).append("analyze_attachments: attachments_only mode enabled")
 

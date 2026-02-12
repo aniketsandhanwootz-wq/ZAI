@@ -26,6 +26,9 @@ from .attachment_tool import AttachmentResolver, ResolvedAttachment, split_cell_
 from .annotate_tool import AnnotateTool
 from .company_tool import CompanyTool
 
+from ..integrations.appsheet_client import AppSheetClient
+from ..integrations.teams_client import TeamsClient
+
 
 # --------------------------
 # Shared envelopes / helpers
@@ -43,6 +46,7 @@ class ToolResponse(BaseModel):
 
 class EmptyIn(BaseModel):
     pass
+
 def _b64_encode(b: bytes) -> str:
     return base64.b64encode(b or b"").decode("utf-8")
 
@@ -157,6 +161,8 @@ def _settings_cache_key(settings: Settings) -> str:
         f"vision_provider={getattr(settings, 'vision_provider', '')}",
         f"vision_model={getattr(settings, 'vision_model', '')}",
         f"drive_root={getattr(settings, 'drive_root_folder_id', '')}",
+        f"appsheet_app={getattr(settings, 'appsheet_app_id', '')}",
+        f"teams_webhook={getattr(settings, 'power_automate_webhook_url', '') or getattr(settings, 'teams_webhook_url', '')}",
     ]
     return "|".join(parts)
 
@@ -458,6 +464,9 @@ class VectorUpsertCompanyProfileIn(BaseModel):
     company_description: str
     embedding: List[float]
 
+class VectorGetCompanyProfileIn(BaseModel):
+    tenant_row_id: str
+
 def build_vector_tools(settings: Settings) -> List[StructuredTool]:
     vt = VectorTool(settings)
 
@@ -548,6 +557,13 @@ def build_vector_tools(settings: Settings) -> List[StructuredTool]:
             name="vector.upsert_company_profile",
         )
 
+    def get_company_profile(inp: VectorGetCompanyProfileIn) -> Dict[str, Any]:
+        return _safe_call(
+            lambda: vt.get_company_profile_by_tenant_row_id(tenant_row_id=inp.tenant_row_id),
+            code="DB_ERROR",
+            name="vector.get_company_profile_by_tenant_row_id",
+        )
+
     return [
         StructuredTool.from_function(name="vector_search_incidents", description="Vector search in incident_vectors.", args_schema=VectorSearchIncidentsIn, func=search_incidents),
         StructuredTool.from_function(name="vector_search_ccp_chunks", description="Vector search in ccp_vectors.", args_schema=VectorSearchCCPIn, func=search_ccp),
@@ -555,6 +571,7 @@ def build_vector_tools(settings: Settings) -> List[StructuredTool]:
         StructuredTool.from_function(name="vector_search_glide_kb_chunks", description="Vector search in glide_kb_vectors joined with metadata.", args_schema=VectorSearchGlideKBIn, func=search_glide_kb),
         StructuredTool.from_function(name="vector_upsert_incident_vector", description="Upsert an incident vector (PROBLEM/RESOLUTION/MEDIA).", args_schema=VectorUpsertIncidentIn, func=upsert_incident),
         StructuredTool.from_function(name="vector_upsert_company_profile", description="Upsert a company profile vector.", args_schema=VectorUpsertCompanyProfileIn, func=upsert_company),
+        StructuredTool.from_function(name="vector_get_company_profile_by_tenant_row_id", description="Fetch company profile row by tenant_row_id.", args_schema=VectorGetCompanyProfileIn, func=get_company_profile),
     ]
 
 
@@ -581,6 +598,39 @@ class DBCheckinFileBriefsIn(BaseModel):
 class DBImageCaptionsIn(BaseModel):
     tenant_id: str
     checkin_id: str
+
+class DBInsertArtifactNoFailIn(BaseModel):
+    run_id: str
+    artifact_type: str
+    url: str
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+class DBInsertArtifactIn(BaseModel):
+    run_id: str
+    artifact_type: str
+    url: str
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+class DBCheckinFileArtifactExistsIn(BaseModel):
+    tenant_id: str
+    checkin_id: str
+    source_hash: str
+    content_hash: str = ""
+
+class DBUpsertCheckinFileArtifactIn(BaseModel):
+    tenant_id: str
+    checkin_id: str
+    source_hash: str
+    source_ref: str
+    filename: str = ""
+    mime_type: str = ""
+    byte_size: int = 0
+    drive_file_id: str = ""
+    direct_url: str = ""
+    content_hash: str = ""
+    extracted_text: str = ""
+    extracted_json: Dict[str, Any] = Field(default_factory=dict)
+    analysis_json: Dict[str, Any] = Field(default_factory=dict)
 
 def build_db_tools(settings: Settings) -> List[StructuredTool]:
     db = DBTool(settings.database_url)
@@ -619,11 +669,72 @@ def build_db_tools(settings: Settings) -> List[StructuredTool]:
             name="db.image_captions_by_hash",
         )
 
+    def insert_artifact_no_fail(inp: DBInsertArtifactNoFailIn) -> Dict[str, Any]:
+        return _safe_call(
+            lambda: bool(db.insert_artifact_no_fail(
+                run_id=inp.run_id,
+                artifact_type=inp.artifact_type,
+                url=inp.url,
+                meta=inp.meta or {},
+            )),
+            code="DB_ERROR",
+            name="db.insert_artifact_no_fail",
+        )
+
+    def insert_artifact(inp: DBInsertArtifactIn) -> Dict[str, Any]:
+        return _safe_call(
+            lambda: db.insert_artifact(
+                run_id=inp.run_id,
+                artifact_type=inp.artifact_type,
+                url=inp.url,
+                meta=inp.meta or {},
+            ),
+            code="DB_ERROR",
+            name="db.insert_artifact",
+        )
+
+    def checkin_file_exists(inp: DBCheckinFileArtifactExistsIn) -> Dict[str, Any]:
+        return _safe_call(
+            lambda: bool(db.checkin_file_artifact_exists(
+                tenant_id=inp.tenant_id,
+                checkin_id=inp.checkin_id,
+                source_hash=inp.source_hash,
+                content_hash=inp.content_hash,
+            )),
+            code="DB_ERROR",
+            name="db.checkin_file_artifact_exists",
+        )
+
+    def upsert_checkin_file(inp: DBUpsertCheckinFileArtifactIn) -> Dict[str, Any]:
+        return _safe_call(
+            lambda: db.upsert_checkin_file_artifact(
+                tenant_id=inp.tenant_id,
+                checkin_id=inp.checkin_id,
+                source_hash=inp.source_hash,
+                source_ref=inp.source_ref,
+                filename=inp.filename,
+                mime_type=inp.mime_type,
+                byte_size=int(inp.byte_size or 0),
+                drive_file_id=inp.drive_file_id,
+                direct_url=inp.direct_url,
+                content_hash=inp.content_hash,
+                extracted_text=inp.extracted_text,
+                extracted_json=inp.extracted_json or {},
+                analysis_json=inp.analysis_json or {},
+            ),
+            code="DB_ERROR",
+            name="db.upsert_checkin_file_artifact",
+        )
+
     return [
         StructuredTool.from_function(name="db_existing_artifact_source_hashes", description="Get already-seen artifact source_hashes for tenant+checkin+type.", args_schema=DBExistingArtifactHashesIn, func=existing_hashes),
         StructuredTool.from_function(name="db_get_artifact_url_and_meta_by_source_hash", description="Get (url, meta) for artifact (latest) by source_hash.", args_schema=DBGetArtifactByHashIn, func=get_artifact),
         StructuredTool.from_function(name="db_get_checkin_file_briefs", description="Get brief checkin_file_artifacts for prompt context.", args_schema=DBCheckinFileBriefsIn, func=checkin_file_briefs),
         StructuredTool.from_function(name="db_image_captions_by_hash", description="Get cached image captions keyed by source_hash.", args_schema=DBImageCaptionsIn, func=image_captions),
+        StructuredTool.from_function(name="db_insert_artifact_no_fail", description="Insert artifact row; never throws; returns bool.", args_schema=DBInsertArtifactNoFailIn, func=insert_artifact_no_fail),
+        StructuredTool.from_function(name="db_insert_artifact", description="Insert artifact row (may throw internally but wrapped).", args_schema=DBInsertArtifactIn, func=insert_artifact),
+        StructuredTool.from_function(name="db_checkin_file_artifact_exists", description="Check if a checkin file artifact already exists (idempotency).", args_schema=DBCheckinFileArtifactExistsIn, func=checkin_file_exists),
+        StructuredTool.from_function(name="db_upsert_checkin_file_artifact", description="Upsert checkin file artifact content/extraction/analysis.", args_schema=DBUpsertCheckinFileArtifactIn, func=upsert_checkin_file),
     ]
 
 
@@ -861,6 +972,79 @@ def build_company_tools(settings: Settings) -> List[StructuredTool]:
 
 
 # --------------------------
+# AppSheet wrappers (integrations)
+# --------------------------
+
+class AppSheetActionRowsIn(BaseModel):
+    table_name: str
+    action: str
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
+    timeout: int = 30
+
+class AppSheetUpsertCuesRowsIn(BaseModel):
+    legacy_id: str
+    cue_items: List[Dict[str, Any]] = Field(default_factory=list)
+    generated_at: str = ""
+
+def build_appsheet_tools(settings: Settings) -> List[StructuredTool]:
+    apps = AppSheetClient(settings)
+
+    def action_rows(inp: AppSheetActionRowsIn) -> Dict[str, Any]:
+        def _do():
+            if not apps.enabled():
+                raise RuntimeError("AppSheet not enabled (missing APPSHEET_APP_ID / APPSHEET_ACCESS_KEY).")
+            return apps.action_rows(
+                table_name=(inp.table_name or "").strip(),
+                action=(inp.action or "").strip(),
+                rows=inp.rows or [],
+                timeout=int(inp.timeout or 30),
+            )
+        return _safe_call(_do, code="APPSHEET_ERROR", name="appsheet.action_rows")
+
+    def upsert_cues(inp: AppSheetUpsertCuesRowsIn) -> Dict[str, Any]:
+        def _do():
+            if not apps.enabled():
+                raise RuntimeError("AppSheet not enabled (missing APPSHEET_APP_ID / APPSHEET_ACCESS_KEY).")
+            return apps.upsert_cues_rows(
+                legacy_id=(inp.legacy_id or "").strip(),
+                cue_items=inp.cue_items or [],
+                generated_at=(inp.generated_at or "").strip(),
+            )
+        return _safe_call(_do, code="APPSHEET_ERROR", name="appsheet.upsert_cues_rows")
+
+    return [
+        StructuredTool.from_function(name="appsheet_action_rows", description="Perform AppSheet action_rows (Add/Update/Delete).", args_schema=AppSheetActionRowsIn, func=action_rows),
+        StructuredTool.from_function(name="appsheet_upsert_cues_rows", description="Upsert 10 cue slots for a legacy_id in AppSheet cues table.", args_schema=AppSheetUpsertCuesRowsIn, func=upsert_cues),
+    ]
+
+
+# --------------------------
+# Teams wrappers (integrations)
+# --------------------------
+
+class TeamsPostMessageIn(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    webhook_url: str = ""
+
+def build_teams_tools(settings: Settings) -> List[StructuredTool]:
+    def post_message(inp: TeamsPostMessageIn) -> Dict[str, Any]:
+        def _do():
+            url = (inp.webhook_url or "").strip() or (
+                getattr(settings, "power_automate_webhook_url", "") or getattr(settings, "teams_webhook_url", "")
+            ).strip()
+            client = TeamsClient(url)
+            if not client.enabled():
+                return {"sent": False, "reason": "Teams webhook not configured"}
+            client.post_message(inp.payload or {})
+            return {"sent": True}
+        return _safe_call(_do, code="TEAMS_ERROR", name="teams.post_message")
+
+    return [
+        StructuredTool.from_function(name="teams_post_message", description="Post a Teams/PowerAutomate webhook payload.", args_schema=TeamsPostMessageIn, func=post_message),
+    ]
+
+
+# --------------------------
 # Toolkit builder (stable API)
 # --------------------------
 
@@ -884,4 +1068,6 @@ def build_langchain_tools(settings: Settings) -> Dict[str, StructuredTool]:
     tools += build_attachment_tools(settings)
     tools += build_annotate_tools()
     tools += build_company_tools(settings)
+    tools += build_appsheet_tools(settings)
+    tools += build_teams_tools(settings)
     return {t.name: t for t in tools}
