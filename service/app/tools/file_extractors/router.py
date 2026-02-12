@@ -75,7 +75,11 @@ def extract_any(*, filename: str, mime_type: str, data: bytes, vision_caption_fn
 
     if mime == "application/pdf":
         from .pdf_extractor import extract_pdf
-        return extract_pdf(filename=filename, data=data)
+        return extract_pdf(
+            filename=filename,
+            data=data,
+            vision_caption_fn=vision_caption_fn,  
+        )
 
     if mime.startswith("image/"):
         from .image_extractor import extract_image

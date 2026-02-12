@@ -37,6 +37,7 @@ load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
 analyze_attachments = _resolve_node(".nodes.analyze_attachments", ["analyze_attachments", "run", "node"])
+correlate_attachments = _resolve_node(".nodes.correlate_attachments", ["correlate_attachments", "run", "node"])
 upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
 retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
 rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
@@ -222,6 +223,7 @@ def _build_langgraph_app() -> Any:
     g.add_node("build_thread_snapshot", _dispatch("build_thread_snapshot"))
     g.add_node("analyze_media", _dispatch("analyze_media"))
     g.add_node("analyze_attachments", _dispatch("analyze_attachments"))
+    g.add_node("correlate_attachments", _dispatch("correlate_attachments"))
     g.add_node("upsert_vectors", _dispatch("upsert_vectors"))
     g.add_node("retrieve_context", _dispatch("retrieve_context"))
     g.add_node("rerank_context", _dispatch("rerank_context"))
@@ -235,9 +237,10 @@ def _build_langgraph_app() -> Any:
     g.add_edge("generate_assembly_todo", "build_thread_snapshot")
     g.add_edge("build_thread_snapshot", "analyze_media")
     g.add_edge("analyze_media", "analyze_attachments")
+    g.add_edge("analyze_attachments", "correlate_attachments")
 
     g.add_conditional_edges(
-        "analyze_attachments",
+        "correlate_attachments",
         _route_after_analyzers,
         {"upsert_vectors": "upsert_vectors", "retrieve_context": "retrieve_context"},
     )
@@ -277,6 +280,7 @@ def _bind_nodes(settings: Settings) -> Dict[str, Callable[[State], State]]:
         "build_thread_snapshot": _mk("build_thread_snapshot", build_thread_snapshot),
         "analyze_media": _mk("analyze_media", analyze_media),
         "analyze_attachments": _mk("analyze_attachments", analyze_attachments),
+        "correlate_attachments": _mk("correlate_attachments", correlate_attachments),
         "upsert_vectors": _mk("upsert_vectors", upsert_vectors),
         "retrieve_context": _mk("retrieve_context", retrieve_context),
         "rerank_context": _mk("rerank_context", rerank_context),

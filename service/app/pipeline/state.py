@@ -50,6 +50,11 @@ class PipelineState(TypedDict, total=False):
     image_captions: List[str]
     defects_by_image: List[Dict[str, Any]]
 
+    # Attachment analysis (Files column)
+    attachments_analyzed: List[Dict[str, Any]]
+    attachment_context: str
+    attachment_evidence: str
+    
     # Company context
     company_name: Optional[str]
     company_description: Optional[str]

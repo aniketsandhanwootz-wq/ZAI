@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
-
-import base64
+from typing import Any, Dict, List, Optional
 
 from ...config import Settings
 from ..lc_runtime import lc_registry, lc_invoke
@@ -19,9 +17,14 @@ def _load_prompt_template() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _load_correlation_template() -> str:
+    p = _repo_root() / "packages" / "prompts" / "attachment_correlation.md"
+    return p.read_text(encoding="utf-8")
+
+
 def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
-    out = template
-    for k, v in vars.items():
+    out = template or ""
+    for k, v in (vars or {}).items():
         out = out.replace("{" + k + "}", v or "")
     return out
 
@@ -72,6 +75,80 @@ def _make_checkin_context(state: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _safe_list(x: Any, *, cap: int = 8) -> List[str]:
+    if not isinstance(x, list):
+        return []
+    out = []
+    for it in x:
+        s = str(it or "").strip()
+        if s:
+            out.append(s)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _compact_measurements(measurements: Any, *, cap: int = 10) -> List[str]:
+    """
+    Accepts either:
+      - list[str]
+      - list[dict] with common keys (name/value/unit/spec/pass_fail)
+    Returns: list[str] compact lines.
+    """
+    if not isinstance(measurements, list):
+        return []
+    out: List[str] = []
+    for it in measurements:
+        if isinstance(it, str):
+            s = it.strip()
+            if s:
+                out.append(s)
+        elif isinstance(it, dict):
+            name = str(it.get("name") or it.get("test") or it.get("parameter") or "").strip()
+            val = str(it.get("value") or "").strip()
+            unit = str(it.get("unit") or "").strip()
+            spec = str(it.get("spec") or it.get("limit") or "").strip()
+            pf = str(it.get("pass_fail") or it.get("result") or "").strip()
+
+            seg = ""
+            if name:
+                seg += name
+            if val:
+                seg += (": " if seg else "") + val
+            if unit:
+                seg += unit if val else (" " + unit)
+            if spec:
+                seg += f" (Spec: {spec})"
+            if pf:
+                seg += f" [{pf}]"
+            seg = seg.strip()
+            if seg:
+                out.append(seg)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _analysis_brief(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize analysis_json into predictable keys even if prompt evolves.
+    """
+    a = analysis or {}
+    return {
+        "doc_type": str(a.get("doc_type") or a.get("type") or "unknown").strip(),
+        "summary": str(a.get("summary") or "").strip(),
+        "matches_checkin": bool(a.get("matches_checkin") is True),
+        "confidence": a.get("confidence", None),
+        "mismatches": _safe_list(a.get("mismatches") or [], cap=6),
+        "key_findings": _safe_list(a.get("key_findings") or a.get("findings") or [], cap=8),
+        "measurements": _compact_measurements(a.get("measurements") or a.get("tests") or [], cap=12),
+        "identifiers": _safe_list(a.get("identifiers") or a.get("ids") or [], cap=8),
+        "dates": _safe_list(a.get("dates") or [], cap=6),
+        "actions": _safe_list(a.get("actions") or [], cap=6),
+        "questions": _safe_list(a.get("questions") or [], cap=6),
+    }
+
+
 def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     tenant_id = _norm(str(state.get("tenant_id") or ""))
     checkin_id = _norm(str(state.get("checkin_id") or ""))
@@ -110,16 +187,39 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
         state["attachments_analyzed"] = []
         return state
 
+    # Pull existing briefs so "exists=True" doesn't delete context from prompt.
+    existing_briefs = lc_invoke(
+        reg,
+        "db_get_checkin_file_briefs",
+        {"tenant_id": tenant_id, "checkin_id": checkin_id, "max_items": 20},
+        state,
+        default=[],
+    ) or []
+    if not isinstance(existing_briefs, list):
+        existing_briefs = []
+
+    briefs_by_hash: Dict[str, Dict[str, Any]] = {}
+    for b in existing_briefs:
+        if isinstance(b, dict):
+            h = str(b.get("source_hash") or b.get("content_hash") or "").strip()
+            if h:
+                briefs_by_hash[h] = b
+
     prompt_t = _load_prompt_template()
+    corr_t = _load_correlation_template()
     checkin_ctx = _make_checkin_context(state)
 
     analyzed: List[Dict[str, Any]] = []
     ctx_lines: List[str] = []
+    per_file_for_correlation: List[Dict[str, Any]] = []
+
     processed = 0
     skipped = 0
 
     max_files = int(meta.get("max_files") or 6)
     max_bytes = int(meta.get("max_bytes") or 15_000_000)
+
+    PROMPT_TEXT_CAP = int(meta.get("prompt_text_cap") or 60000)
 
     for ref in refs[:max_files]:
         att = lc_invoke(reg, "attachment_resolve", {"ref": ref}, state, default=None)
@@ -148,6 +248,7 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
         )
 
         if not isinstance(fetch, dict) or not fetch.get("content_b64"):
+            # Record failure into DB (idempotent), but also keep context line.
             sh = lc_invoke(reg, "file_sha256_text", {"text": att.get("source_ref") or ""}, state, default="") or ""
             lc_invoke(
                 reg,
@@ -170,43 +271,71 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 state,
                 default=None,
             )
+            ctx_lines.append(f"- File: {att.get('name') or ''} | download_failed")
             analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": False, "reason": "download_failed"})
             skipped += 1
             continue
 
         content_b64 = fetch.get("content_b64") or ""
-        if not content_b64:
-            skipped += 1
-            continue
-
         content_hash = lc_invoke(reg, "file_sha256_bytes", {"content_b64": content_b64}, state, default="") or ""
         source_hash = str(content_hash)
 
+        # If exists, DO NOT skip context. Pull brief from DB and include.
         exists = lc_invoke(
             reg,
             "db_checkin_file_artifact_exists",
-            {
-                "tenant_id": tenant_id,
-                "checkin_id": checkin_id,
-                "source_hash": source_hash,
-                "content_hash": str(content_hash),
-            },
+            {"tenant_id": tenant_id, "checkin_id": checkin_id, "source_hash": source_hash, "content_hash": str(content_hash)},
             state,
             default=False,
         )
         if bool(exists):
-            analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": True, "skipped": True})
+            b = briefs_by_hash.get(source_hash) or {}
+            analysis_prev = b.get("analysis_json") if isinstance(b, dict) else {}
+            if not isinstance(analysis_prev, dict):
+                analysis_prev = {}
+            brief = _analysis_brief(analysis_prev)
+
+            line = f"- File: {att.get('name') or ''} | type={brief['doc_type']} | cached=True | matches={brief['matches_checkin']}"
+            conf = brief.get("confidence", None)
+            if conf is not None:
+                try:
+                    line += f" | confidence={float(conf):.2f}"
+                except Exception:
+                    pass
+            if brief["identifiers"]:
+                line += "\n  IDs: " + "; ".join(brief["identifiers"][:6])
+            if brief["dates"]:
+                line += "\n  Dates: " + "; ".join(brief["dates"][:4])
+            if brief["measurements"]:
+                line += "\n  Measurements: " + "; ".join(brief["measurements"][:8])
+            if brief["summary"]:
+                line += f"\n  Summary: {brief['summary']}"
+            if brief["mismatches"]:
+                line += "\n  Mismatches: " + "; ".join(brief["mismatches"][:4])
+
+            ctx_lines.append(line)
+            per_file_for_correlation.append(
+                {
+                    "filename": att.get("name") or "",
+                    "doc_type": brief["doc_type"],
+                    "identifiers": brief["identifiers"],
+                    "dates": brief["dates"],
+                    "measurements": brief["measurements"],
+                    "key_findings": brief["key_findings"],
+                    "mismatches": brief["mismatches"],
+                    "summary": brief["summary"],
+                    "confidence": brief.get("confidence", None),
+                    "cached": True,
+                }
+            )
+            analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": True, "cached": True})
             skipped += 1
             continue
 
         mime = lc_invoke(
             reg,
             "file_sniff_mime",
-            {
-                "filename": att.get("name") or "",
-                "declared_mime": att.get("mime_type") or "",
-                "content_b64": content_b64,
-            },
+            {"filename": att.get("name") or "", "declared_mime": att.get("mime_type") or "", "content_b64": content_b64},
             state,
             default="",
         ) or ""
@@ -219,17 +348,20 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 "mime_type": str(mime),
                 "content_b64": content_b64,
                 "context_hint": checkin_ctx,
-                "enable_vision_caption": True,
+                "enable_vision_caption": True,  # uses OCR_MODE for scanned PDF pages (from pdf_extractor)
             },
             state,
             default=None,
         )
-
         if not isinstance(ex, dict):
             ex = {"doc_type": "unknown", "extracted_text": "", "extracted_json": {}, "meta": {}}
 
         attachment_text = (ex.get("extracted_text") or "").strip()
-        attachment_text_for_prompt = attachment_text[:20000] + "\n\n[TRUNCATED]" if len(attachment_text) > 20000 else attachment_text
+        attachment_text_for_prompt = (
+            attachment_text[:PROMPT_TEXT_CAP] + "\n\n[TRUNCATED]"
+            if len(attachment_text) > PROMPT_TEXT_CAP
+            else attachment_text
+        )
 
         attachment_meta = {
             "filename": att.get("name") or "",
@@ -271,6 +403,7 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 "confidence": 0.0,
             }
 
+        # Persist full extraction + analysis
         lc_invoke(
             reg,
             "db_upsert_checkin_file_artifact",
@@ -286,42 +419,93 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 "direct_url": att.get("direct_url") or "",
                 "content_hash": str(content_hash),
                 "extracted_text": attachment_text[:120000],
-                "extracted_json": {"doc_type": ex.get("doc_type") or "", "meta": ex.get("meta") or {}, **(ex.get("extracted_json") or {})},
+                "extracted_json": {
+                    "doc_type": ex.get("doc_type") or "",
+                    "meta": ex.get("meta") or {},
+                    **(ex.get("extracted_json") or {}),
+                },
                 "analysis_json": analysis or {},
             },
             state,
             default=None,
         )
 
-        summ = str((analysis or {}).get("summary") or "").strip()
-        matches = bool((analysis or {}).get("matches_checkin") is True)
-        conf = (analysis or {}).get("confidence", None)
-        mism = (analysis or {}).get("mismatches") or []
-        if not isinstance(mism, list):
-            mism = []
-        mism = [str(x).strip() for x in mism if str(x).strip()][:4]
+        brief = _analysis_brief(analysis)
 
-        line = f"- File: {att.get('name') or ''} | type={ex.get('doc_type') or ''} | matches={matches}"
+        line = f"- File: {att.get('name') or ''} | type={brief['doc_type']} | matches={brief['matches_checkin']}"
+        conf = brief.get("confidence", None)
         if conf is not None:
             try:
                 line += f" | confidence={float(conf):.2f}"
             except Exception:
                 pass
-        if summ:
-            line += f"\n  Summary: {summ}"
-        if mism:
-            line += "\n  Mismatches: " + "; ".join(mism)
+
+        if brief["identifiers"]:
+            line += "\n  IDs: " + "; ".join(brief["identifiers"][:6])
+        if brief["dates"]:
+            line += "\n  Dates: " + "; ".join(brief["dates"][:4])
+        if brief["measurements"]:
+            line += "\n  Measurements: " + "; ".join(brief["measurements"][:8])
+        if brief["key_findings"]:
+            line += "\n  KeyFindings: " + "; ".join(brief["key_findings"][:6])
+        if brief["summary"]:
+            line += f"\n  Summary: {brief['summary']}"
+        if brief["mismatches"]:
+            line += "\n  Mismatches: " + "; ".join(brief["mismatches"][:4])
 
         ctx_lines.append(line)
+        per_file_for_correlation.append(
+            {
+                "filename": att.get("name") or "",
+                "doc_type": brief["doc_type"],
+                "identifiers": brief["identifiers"],
+                "dates": brief["dates"],
+                "measurements": brief["measurements"],
+                "key_findings": brief["key_findings"],
+                "mismatches": brief["mismatches"],
+                "summary": brief["summary"],
+                "confidence": brief.get("confidence", None),
+                "cached": False,
+            }
+        )
 
-        analyzed.append({"ref": att.get("source_ref"), "filename": att.get("name"), "ok": True, "doc_type": ex.get("doc_type") or ""})
+        analyzed.append(
+            {
+                "ref": att.get("source_ref"),
+                "filename": att.get("name"),
+                "ok": True,
+                "doc_type": ex.get("doc_type") or "",
+                "analysis": analysis if isinstance(analysis, dict) else {},
+            }
+        )
         processed += 1
 
+    # Build the attachment_context (this is what checkin_reply.md receives)
+    base_ctx = "\n".join(ctx_lines).strip()
     state["attachments_analyzed"] = analyzed
-    state["attachment_context"] = "\n".join(ctx_lines).strip()
+    state["attachment_context"] = base_ctx
+
+    # Cross-file correlation step (merges evidence + flags conflicts)
+    corr_block = ""
+    if per_file_for_correlation and corr_t:
+        corr_prompt = _render_template_safe(
+            corr_t,
+            {
+                "checkin_context": checkin_ctx,
+                "attachment_meta": "",  # not used here
+                "attachment_text": "",  # not used here
+            },
+        )
+        corr_prompt = (corr_prompt.strip() + "\n\nCHECKIN_CONTEXT:\n" + checkin_ctx + "\n\nFILES:\n" + str(per_file_for_correlation)).strip()
+
+        corr_txt = lc_invoke(reg, "llm_generate_text", {"prompt": corr_prompt}, state, default="") or ""
+        corr_block = str(corr_txt or "").strip()
+
+    if corr_block:
+        merged = ("ATTACHMENT CONTEXT (from Files):\n" + base_ctx + "\n\n" + corr_block).strip()
+        state["attachment_context"] = merged
 
     state.setdefault("logs", []).append(f"analyze_attachments: processed={processed} skipped={skipped} max_files={max_files}")
-
     if attachments_only:
         state.setdefault("logs", []).append("analyze_attachments: attachments_only mode enabled")
 
