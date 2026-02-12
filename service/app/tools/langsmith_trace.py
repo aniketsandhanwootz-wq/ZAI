@@ -224,3 +224,58 @@ def flush_traces() -> None:
             Client().flush()
     except Exception:
         pass
+
+def mk_http_meta(
+    *,
+    url: str = "",
+    method: str = "POST",
+    status_code: Optional[int] = None,
+    provider: str = "",
+    model: str = "",
+    timeout_s: Optional[int] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Build SAFE http metadata for tracing/logging.
+
+    Rules:
+    - Never include headers, tokens, or request/response bodies.
+    - Strip querystring to avoid leaking API keys (e.g., ?key=...).
+    """
+    safe_url = (url or "").strip()
+    if "?" in safe_url:
+        safe_url = safe_url.split("?", 1)[0]
+
+    out: Dict[str, Any] = {
+        "http": {
+            "method": (method or "POST").upper(),
+            "url": safe_url,
+        }
+    }
+
+    if status_code is not None:
+        out["http"]["status_code"] = int(status_code)
+
+    if timeout_s is not None:
+        out["http"]["timeout_s"] = int(timeout_s)
+
+    if provider:
+        out["provider"] = str(provider)
+
+    if model:
+        out["model"] = str(model)
+
+    if isinstance(extra, dict) and extra:
+        # Ensure extra is JSON-ish and not huge/sensitive
+        cleaned: Dict[str, Any] = {}
+        for k, v in extra.items():
+            if v is None:
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                cleaned[str(k)] = v
+            else:
+                cleaned[str(k)] = str(v)
+        if cleaned:
+            out["extra"] = cleaned
+
+    return out
