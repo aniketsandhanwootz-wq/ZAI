@@ -154,8 +154,10 @@ def _timed_node(settings: Settings, state: State, name: str, fn: NodeFn) -> Stat
 def _assembly_todo_nonfatal(settings: Settings, state: State) -> State:
     try:
         return _timed_node(settings, state, "generate_assembly_todo", generate_assembly_todo)
-    except Exception as e:
-        _ensure_logs(state).append(f"assembly_todo: non-fatal failure: {e}")
+    except Exception:
+        # Log full details internally, but do not leak exception text to returned logs
+        logger.exception("assembly_todo: non-fatal failure")
+        _ensure_logs(state).append("assembly_todo: non-fatal failure (see server logs for details)")
         return state
 
 
@@ -423,15 +425,18 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             }
 
     except Exception as e:
+        # Keep detailed diagnostics internally
         runlog.error(run_id, str(e))
-        logger.exception("ERROR: %s", e)
+        logger.exception("ERROR during event processing")
+
+        # Do NOT return raw exception string or exception-tainted logs to caller
         return {
             "run_id": run_id,
             "ok": False,
-            "error": str(e),
+            "error": "Internal error during event processing",
             "primary_id": primary_id,
             "event_type": event_type,
-            "logs": state.get("logs"),
+            "details_logged": True,
         }
 
     finally:
