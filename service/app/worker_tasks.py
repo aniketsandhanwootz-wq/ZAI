@@ -39,7 +39,7 @@ def enqueue_event_task(payload: Dict[str, Any], *, queue_name: str = "default", 
     """
     settings = load_settings()
     q = _rq_queue(settings, queue_name)
-    job = q.enqueue("service.app.worker_tasks.process_event_task", payload, job_timeout=job_timeout)
+    job = q.enqueue(process_event_task, payload, job_timeout=job_timeout)
     return {
         "ok": True,
         "job_id": job.id,
@@ -55,7 +55,7 @@ def enqueue_glide_webhook_task(payload: Dict[str, Any], *, queue_name: str = "de
     """
     settings = load_settings()
     q = _rq_queue(settings, queue_name)
-    job = q.enqueue("service.app.worker_tasks.process_glide_webhook_task", payload, job_timeout=job_timeout)
+    job = q.enqueue(process_glide_webhook_task, payload, job_timeout=job_timeout)
     return {"ok": True, "job_id": job.id, "queue": q.name}
 
 
@@ -149,16 +149,10 @@ def process_glide_webhook_task(payload: Dict[str, Any]) -> Dict[str, Any]:
                 ok += 1
                 results.append({"row_id": rid, "ok": True, "result": out})
             except Exception as e:
-                # Log full error details server-side, but do not expose them to the client.
                 runlog.error(run_id, str(e))
+                logger.exception("glide row processing failed")
                 err += 1
-                results.append(
-                    {
-                        "row_id": rid,
-                        "ok": False,
-                        "error": f"Internal error while processing {table_key} row",
-                    }
-                )
+                results.append({"row_id": rid, "ok": False, "error": "Row processing failed"})
 
     return {
         "ok": err == 0,

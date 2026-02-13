@@ -56,9 +56,9 @@ def sheets_webhook(
     qname = (queue or "").strip() or _default_queue(settings)
 
     try:
-        from ..worker_tasks import enqueue_event_task
+        from ..queue import enqueue_event_task
 
-        job = enqueue_event_task(p, queue_name=qname)
+        job = enqueue_event_task(settings, p, queue_name=qname)
         return {"ok": True, "enqueued": True, "queue": qname, "job": job}
     except RedisConnectionError as e:
         # Apps Script can retry safely
