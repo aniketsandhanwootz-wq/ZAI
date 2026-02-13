@@ -81,7 +81,39 @@ def _find_row_value(row: Dict[str, Any], *, preferred_key: Optional[str], fallba
 
     return ""
 
+def _as_list(x: Any) -> List[Any]:
+    """
+    Normalize tool outputs that might come as:
+      - list
+      - {"rows": [...]}
+      - {"result": {"rows": [...]}} (handled by lc_invoke unwrap, but keep defensive)
+      - None
+    """
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    if isinstance(x, dict):
+        v = x.get("rows")
+        if isinstance(v, list):
+            return v
+    return []
 
+def _as_row(x: Any) -> Optional[Dict[str, Any]]:
+    """
+    Normalize a single row that might come as:
+      - dict (row)
+      - {"row": {...}}
+      - None
+    """
+    if x is None:
+        return None
+    if isinstance(x, dict):
+        r = x.get("row")
+        if isinstance(r, dict):
+            return r
+        return x
+    return None
 def _drive_view_url(file_id: str) -> str:
     fid = (file_id or "").strip()
     if not fid:
@@ -93,6 +125,11 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     reg = lc_registry(settings, state)
     payload = state.get("payload") or {}
 
+    # ---- IMPORTANT: Avoid stale sheet reads across worker runs ----
+    # ToolRegistry (and thus SheetsTool) is cached per process; refresh the key tabs per run.
+    lc_invoke(reg, "sheets_refresh_cache", {"tab_key": "checkin"}, state, default=None)
+    lc_invoke(reg, "sheets_refresh_cache", {"tab_key": "project"}, state, default=None)
+    lc_invoke(reg, "sheets_refresh_cache", {"tab_key": "conversation"}, state, default=None)
     # -------------------------
     # Meta flags / overrides
     # -------------------------
@@ -139,6 +176,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
             state,
             default=None,
         )
+    checkin_row = _as_row(checkin_row)
     state["checkin_row"] = checkin_row
 
     project_name = _norm_value((checkin_row or {}).get(k_ci_project, ""))
@@ -224,6 +262,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     project_row = None
 
     if not tenant_id:
+        # 1) Primary: by legacy_id (fast + precise if mapping is correct)
         if legacy_id:
             project_row = lc_invoke(
                 reg,
@@ -233,6 +272,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
                 default=None,
             )
 
+        # 2) Secondary: (only if legacy_id exists; your SheetsTool likely requires it)
         if not project_row and project_name and part_number and legacy_id:
             project_row = lc_invoke(
                 reg,
@@ -242,17 +282,73 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
                 default=None,
             )
 
-        if project_row:
-            col_tenant = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "company_row_id"}, state, default="")
-            tenant_id = _norm_value(project_row.get(_key(col_tenant), ""))
+        # 3) Fallback: scan projects by Project name + Part number
+        #    This fixes cases where mapping for "legacy_id" lookup is broken or payload doesn't carry legacy_id reliably.
+        if not project_row and project_name and part_number:
+            all_projects = _as_list(lc_invoke(reg, "sheets_list_projects", {}, state, default=[]))
 
-            # Fill missing values from project row (nice-to-have)
-            col_pname = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "project_name"}, state, default="")
-            col_ppart = lc_invoke(reg, "sheets_map_col", {"table": "project", "field": "part_number"}, state, default="")
-            if not project_name and col_pname:
-                project_name = _norm_value(project_row.get(_key(col_pname), ""))
-            if not part_number and col_ppart:
-                part_number = _norm_value(project_row.get(_key(col_ppart), ""))
+            def _row_proj_name(r: Dict[str, Any]) -> str:
+                return _find_row_value(
+                    r,
+                    preferred_key=None,
+                    fallbacks=["Project name", "Project Name", "project name"],
+                )
+
+            def _row_part_no(r: Dict[str, Any]) -> str:
+                return _find_row_value(
+                    r,
+                    preferred_key=None,
+                    fallbacks=["Part number", "Part Number", "part number", "Part no", "Part No"],
+                )
+
+            want_pn = _key(project_name)
+            want_part = _key(part_number)
+
+            best = None
+            for r in all_projects:
+                if _key(_row_proj_name(r)) == want_pn and _key(_row_part_no(r)) == want_part:
+                    best = r
+                    break
+
+            project_row = best
+        project_row = _as_row(project_row)
+        if project_row:
+            # tenant/company row id mapping (robust):
+            # - First try mapping.yaml via sheets_map_col(project, company_row_id)
+            # - If mapping missing/wrong, fallback to literal header "Company row id"
+            col_tenant = lc_invoke(
+                reg,
+                "sheets_map_col",
+                {"table": "project", "field": "company_row_id"},
+                state,
+                default="",
+            )
+            tenant_id = _find_row_value(
+                project_row,
+                preferred_key=_key(col_tenant) if col_tenant else None,
+                fallbacks=[
+                    "Company row id",
+                    "Company Row ID",
+                    "Company row ID",
+                    "Company Row Id",
+                    "Company RowID",
+                ],
+            )
+
+            # Fill missing values from project row (nice-to-have; also robust to mapping issues)
+            if not project_name:
+                project_name = _find_row_value(
+                    project_row,
+                    preferred_key=None,
+                    fallbacks=["Project name", "Project Name", "project name"],
+                )
+            if not part_number:
+                part_number = _find_row_value(
+                    project_row,
+                    preferred_key=None,
+                    fallbacks=["Part number", "Part Number", "part number", "Part no", "Part No"],
+                )
+
             state["project_name"] = project_name or None
             state["part_number"] = part_number or None
 
@@ -261,13 +357,15 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
 
     convo_rows = []
     if checkin_id:
-        convo_rows = lc_invoke(
-            reg,
-            "sheets_get_conversations_for_checkin",
-            {"checkin_id": str(checkin_id)},
-            state,
-            default=[],
-        ) or []
+        convo_rows = _as_list(
+            lc_invoke(
+                reg,
+                "sheets_get_conversations_for_checkin",
+                {"checkin_id": str(checkin_id)},
+                state,
+                default=[],
+            )
+        )
     state["conversation_rows"] = convo_rows
 
     state["closure_notes"] = _extract_closure_notes(convo_rows)

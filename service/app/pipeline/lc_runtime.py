@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
 
+def _is_envelope(x: Any) -> bool:
+    return isinstance(x, dict) and "ok" in x and ("result" in x or "error" in x)
 
+def _unwrap_result(x: Any) -> Any:
+    """
+    Recursively unwrap nested ToolResponse-style envelopes:
+      {"ok": True, "result": <maybe another envelope>, ...}
+    This prevents shape drift when a tool already returns an envelope.
+    """
+    cur = x
+    # unwrap up to a small depth to avoid accidental loops
+    for _ in range(5):
+        if _is_envelope(cur) and cur.get("ok") is True:
+            cur = cur.get("result")
+            continue
+        break
+    return cur
 def _ensure_logs(state: Dict[str, Any]) -> list:
     if "logs" not in state or not isinstance(state.get("logs"), list):
         state["logs"] = []
@@ -88,7 +104,7 @@ def lc_invoke(
             pass
 
         if isinstance(resp, dict) and resp.get("ok") is True:
-            return resp.get("result")
+            return _unwrap_result(resp.get("result"))
 
         err = (resp or {}).get("error") if isinstance(resp, dict) else {}
         code = (err or {}).get("code") or "UNKNOWN"
@@ -131,7 +147,7 @@ def lc_invoke(
         return default
 
     if resp.get("ok") is True:
-        return resp.get("result")
+        return _unwrap_result(resp.get("result"))
 
     err = resp.get("error") or {}
     code = (err.get("code") or "UNKNOWN").strip()

@@ -273,9 +273,13 @@ class SheetsListAdditionalPhotosIn(BaseModel):
 class SheetsResolveLegacyIdForGlideRowIn(BaseModel):
     row: Dict[str, Any]
 
+
 class SheetsMapColIn(BaseModel):
     table: str
     field: str
+
+class SheetsRefreshCacheIn(BaseModel):
+    tab_key: Optional[str] = None  # "checkin", "project", "conversation", etc. None clears all
 
 def build_sheets_tools(settings: Settings) -> List[StructuredTool]:
     sheets = SheetsTool(settings)
@@ -346,7 +350,11 @@ def build_sheets_tools(settings: Settings) -> List[StructuredTool]:
 
     def map_col(inp: SheetsMapColIn) -> Dict[str, Any]:
         return _safe_call(lambda: sheets.map.col(inp.table, inp.field), code="SHEETS_ERROR", name="sheets.map.col")
-
+    def refresh_cache(inp: SheetsRefreshCacheIn) -> Dict[str, Any]:
+        def _do():
+            sheets.refresh_cache(inp.tab_key)
+            return {"refreshed": inp.tab_key or "*"}
+        return _safe_call(_do, code="SHEETS_ERROR", name="sheets.refresh_cache")
     return [
         StructuredTool.from_function(name="sheets_get_checkin_by_id", description="Fetch a checkin row dict by checkin_id from Sheets.", args_schema=SheetsGetCheckinIn, func=get_checkin),
         StructuredTool.from_function(name="sheets_get_project_by_legacy_id", description="Fetch a project row dict by legacy_id from Sheets.", args_schema=SheetsGetProjectByLegacyIdIn, func=get_project),
@@ -361,6 +369,12 @@ def build_sheets_tools(settings: Settings) -> List[StructuredTool]:
         StructuredTool.from_function(name="sheets_list_additional_photos_for_checkin", description="List additional photos rows for checkin from a provided tab name.", args_schema=SheetsListAdditionalPhotosIn, func=list_additional_photos),
         StructuredTool.from_function(name="sheets_resolve_legacy_id_for_glide_row", description="Resolve legacy_id for an arbitrary Glide row dict using Phase-0 rules.", args_schema=SheetsResolveLegacyIdForGlideRowIn, func=resolve_legacy),
         StructuredTool.from_function(name="sheets_map_col", description="Return the mapped sheet header for (table, field) using sheets_mapping.yaml.", args_schema=SheetsMapColIn, func=map_col),
+        StructuredTool.from_function(
+            name="sheets_refresh_cache",
+            description="Clear SheetsTool in-memory cache. tab_key=None clears all; or pass 'checkin'/'project'/'conversation'.",
+            args_schema=SheetsRefreshCacheIn,
+            func=refresh_cache,
+        ),
     ]
 
 
