@@ -104,22 +104,17 @@ class ToolRegistry:
     def invoke(self, name: str, inp: Dict[str, Any]) -> Dict[str, Any]:
         """
         Always returns a single ToolResponse dict. Never raises.
-
-        Important:
-        - Many tool wrappers already return our {ok,result,error} envelope via _safe_call().
-          In that case, we pass it through unchanged (no double-wrapping).
-        - If a tool returns a raw value, we wrap it into ToolResponse(ok=True,...).
-        - If tool.invoke raises, we return ToolResponse(ok=False,...).
         """
-        def _do():
-            tool = self.get(name)
-            payload = inp if isinstance(inp, dict) else {"value": inp}
-            return tool.invoke(payload)
+        tool = self.get(name)
+        payload = inp if isinstance(inp, dict) else {"value": inp}
 
-        traced = traceable_wrap(lambda: _do(), name=f"zai.tool.{name}", run_type="tool")
+        def _do(p: Dict[str, Any]) -> Any:
+            return tool.invoke(p)
+
+        traced = traceable_wrap(_do, name=f"zai.tool.{name}", run_type="tool")
 
         try:
-            out = traced()
+            out = traced(payload)
 
             # If wrapper already returned the envelope, do NOT wrap again.
             if isinstance(out, dict) and "ok" in out and ("result" in out or "error" in out):
@@ -146,32 +141,46 @@ class ToolRegistry:
 
 _REGISTRY_CACHE: Dict[str, ToolRegistry] = {}
 
+def _hash_key_part(s: Any) -> str:
+    """
+    Hash any potentially sensitive setting value (db urls, tokens, etc.)
+    so it never appears in memory keys, logs, or traces.
+    """
+    try:
+        import hashlib
+        raw = (str(s or "")).encode("utf-8", errors="ignore")
+        return hashlib.sha256(raw).hexdigest()[:12]
+    except Exception:
+        return "000000000000"
 def _settings_cache_key(settings: Settings) -> str:
     """
     Settings objects are unhashable; derive a stable key from fields that affect tool behavior.
-    IMPORTANT: must match actual Settings field names.
+
+    SECURITY:
+    - Do NOT include raw URLs/keys (db url, redis url, webhooks) in cache keys.
+    - Hash everything that might include secrets.
     """
     parts = [
-        f"db={getattr(settings, 'database_url', '')}",
-        f"redis={getattr(settings, 'redis_url', '')}",
-        f"sheet={getattr(settings, 'spreadsheet_id', '')}",
+        f"db={_hash_key_part(getattr(settings, 'database_url', ''))}",
+        f"redis={_hash_key_part(getattr(settings, 'redis_url', ''))}",
+        f"sheet={_hash_key_part(getattr(settings, 'spreadsheet_id', ''))}",
 
-        f"llm_provider={getattr(settings, 'llm_provider', '')}",
-        f"llm_model={getattr(settings, 'llm_model', '')}",
+        f"llm_provider={_hash_key_part(getattr(settings, 'llm_provider', ''))}",
+        f"llm_model={_hash_key_part(getattr(settings, 'llm_model', ''))}",
 
-        f"embed_provider={getattr(settings, 'embedding_provider', '')}",
-        f"embed_model={getattr(settings, 'embedding_model', '')}",
-        f"embed_dims={getattr(settings, 'embedding_dims', '')}",
+        f"embed_provider={_hash_key_part(getattr(settings, 'embedding_provider', ''))}",
+        f"embed_model={_hash_key_part(getattr(settings, 'embedding_model', ''))}",
+        f"embed_dims={_hash_key_part(getattr(settings, 'embedding_dims', ''))}",
 
-        f"vision_provider={getattr(settings, 'vision_provider', '')}",
-        f"vision_model={getattr(settings, 'vision_model', '')}",
+        f"vision_provider={_hash_key_part(getattr(settings, 'vision_provider', ''))}",
+        f"vision_model={_hash_key_part(getattr(settings, 'vision_model', ''))}",
 
-        f"drive_root={getattr(settings, 'google_drive_root_folder_id', '')}",
-        f"drive_annotated={getattr(settings, 'google_drive_annotated_folder_id', '')}",
+        f"drive_root={_hash_key_part(getattr(settings, 'google_drive_root_folder_id', ''))}",
+        f"drive_annotated={_hash_key_part(getattr(settings, 'google_drive_annotated_folder_id', ''))}",
 
-        f"appsheet_app={getattr(settings, 'appsheet_app_id', '')}",
-        f"teams_webhook={getattr(settings, 'power_automate_webhook_url', '') or getattr(settings, 'teams_webhook_url', '')}",
-        f"glide_app={getattr(settings, 'glide_app_id', '')}",
+        f"appsheet_app={_hash_key_part(getattr(settings, 'appsheet_app_id', ''))}",
+        f"teams_webhook={_hash_key_part(getattr(settings, 'power_automate_webhook_url', '') or getattr(settings, 'teams_webhook_url', ''))}",
+        f"glide_app={_hash_key_part(getattr(settings, 'glide_app_id', ''))}",
     ]
     return "|".join(parts)
 
@@ -179,12 +188,25 @@ def get_tool_registry(settings: Settings) -> ToolRegistry:
     """
     Cached ToolRegistry keyed by a stable subset of settings.
     This avoids crashes from hashing Settings objects.
+
+    NOTE:
+    - Registry cache is bounded to avoid unbounded growth if settings vary per run/tenant.
     """
     key = _settings_cache_key(settings)
     reg = _REGISTRY_CACHE.get(key)
     if reg:
         return reg
+
     reg = ToolRegistry(tools=build_langchain_tools(settings))
+
+    # bounded cache (simple FIFO eviction)
+    if len(_REGISTRY_CACHE) >= 32:
+        try:
+            oldest_key = next(iter(_REGISTRY_CACHE.keys()))
+            _REGISTRY_CACHE.pop(oldest_key, None)
+        except Exception:
+            _REGISTRY_CACHE.clear()
+
     _REGISTRY_CACHE[key] = reg
     return reg
 
@@ -998,29 +1020,37 @@ class AppSheetUpsertCuesRowsIn(BaseModel):
 def build_appsheet_tools(settings: Settings) -> List[StructuredTool]:
     apps = AppSheetClient(settings)
 
-    def action_rows(inp: AppSheetActionRowsIn) -> Dict[str, Any]:
+    def action_rows(
+        table_name: str,
+        action: str,
+        rows: Optional[List[Dict[str, Any]]] = None,
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
         def _do():
             if not apps.enabled():
                 raise RuntimeError("AppSheet not enabled (missing APPSHEET_APP_ID / APPSHEET_ACCESS_KEY).")
             return apps.action_rows(
-                table_name=(inp.table_name or "").strip(),
-                action=(inp.action or "").strip(),
-                rows=inp.rows or [],
-                timeout=int(inp.timeout or 30),
+                table_name=(table_name or "").strip(),
+                action=(action or "").strip(),
+                rows=rows or [],
+                timeout=int(timeout or 30),
             )
         return _safe_call(_do, code="APPSHEET_ERROR", name="appsheet.action_rows")
 
-    def upsert_cues(inp: AppSheetUpsertCuesRowsIn) -> Dict[str, Any]:
+    def upsert_cues(
+        legacy_id: str,
+        cue_items: Optional[List[Dict[str, Any]]] = None,
+        generated_at: str = "",
+    ) -> Dict[str, Any]:
         def _do():
             if not apps.enabled():
                 raise RuntimeError("AppSheet not enabled (missing APPSHEET_APP_ID / APPSHEET_ACCESS_KEY).")
             return apps.upsert_cues_rows(
-                legacy_id=(inp.legacy_id or "").strip(),
-                cue_items=inp.cue_items or [],
-                generated_at=(inp.generated_at or "").strip(),
+                legacy_id=(legacy_id or "").strip(),
+                cue_items=cue_items or [],
+                generated_at=(generated_at or "").strip(),
             )
         return _safe_call(_do, code="APPSHEET_ERROR", name="appsheet.upsert_cues_rows")
-
     return [
         StructuredTool.from_function(name="appsheet_action_rows", description="Perform AppSheet action_rows (Add/Update/Delete).", args_schema=AppSheetActionRowsIn, func=action_rows),
         StructuredTool.from_function(name="appsheet_upsert_cues_rows", description="Upsert 10 cue slots for a legacy_id in AppSheet cues table.", args_schema=AppSheetUpsertCuesRowsIn, func=upsert_cues),
@@ -1159,14 +1189,30 @@ class HttpPostJsonIn(BaseModel):
 def build_http_tools(_: Settings) -> List[StructuredTool]:
     def post_json(inp: HttpPostJsonIn) -> Dict[str, Any]:
         def _do():
+            from .langsmith_trace import mk_http_meta  # local import to avoid cycles
+
             url = (inp.url or "").strip()
             if not url:
                 raise ValueError("Missing url")
-            resp = requests.post(url, json=inp.payload or {}, timeout=int(inp.timeout or 30))
+
+            timeout_s = int(inp.timeout or 30)
+            resp = requests.post(url, json=inp.payload or {}, timeout=timeout_s)
+
             body = (resp.text or "")
             if len(body) > 2000:
                 body = body[:2000] + "\n...[TRUNCATED]"
-            return {"status_code": int(resp.status_code), "text": body}
+
+            return {
+                "status_code": int(resp.status_code),
+                "text": body,
+                # safe trace/debug meta (no headers, no body)
+                "meta": mk_http_meta(
+                    url=url,
+                    method="POST",
+                    status_code=int(resp.status_code),
+                    timeout_s=timeout_s,
+                ),
+            }
         return _safe_call(_do, code="HTTP_ERROR", name="http.post_json")
 
     return [

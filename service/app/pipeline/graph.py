@@ -6,14 +6,11 @@ import logging
 import time
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
-
 from langgraph.graph import StateGraph, END
-
+from ..tools.langsmith_trace import traceable_wrap, tracing_context, flush_traces
 from ..config import Settings
 from ..logctx import run_id_var
 from .ingest.run_log import RunLog
-from ..tools.langsmith_trace import traceable_wrap, tracing_context
-
 logger = logging.getLogger("zai.graph")
 
 State = Dict[str, Any]
@@ -317,9 +314,20 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
         "idempotency_primary_id": primary_id_scoped,
         "tenant_hint": tenant_id_hint,
     }
-
+    p = payload or {}
+    meta = (p.get("meta") or {}) if isinstance(p, dict) else {}
+    md = {
+        "event_type": p.get("event_type"),
+        "checkin_id": p.get("checkin_id"),
+        "conversation_id": p.get("conversation_id"),
+        "legacy_id": p.get("legacy_id"),
+        "ccp_id": p.get("ccp_id"),
+        "tenant_id": meta.get("tenant_id") or p.get("tenant_id"),
+        "ingest_only": bool(meta.get("ingest_only") or p.get("ingest_only") or False),
+        "media_only": bool(meta.get("media_only") or p.get("media_only") or False),
+    }
     try:
-        with tracing_context(trace_meta):
+        with tracing_context(metadata={**trace_meta, **md}):
             if event_type not in _ALLOWED_EVENT_TYPES:
                 msg = f"Skipping pipeline for event_type='{event_type}' (allowed={sorted(_ALLOWED_EVENT_TYPES)})"
                 _ensure_logs(state).append(msg)

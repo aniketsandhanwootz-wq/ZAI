@@ -7,7 +7,7 @@
 # It also starts a background consumer thread for processing jobs.
 # Happy coding!
 from __future__ import annotations
-
+import os
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Literal
@@ -44,6 +44,29 @@ logger = logging.getLogger("zai")
 async def lifespan(app: FastAPI):
     settings = load_settings()
     app.state.settings = settings
+    # ---- LangSmith env wiring (so tracing actually turns on) ----
+    try:
+        tracing_on = bool(getattr(settings, "langsmith_tracing", False))
+        project = (getattr(settings, "langsmith_project", "") or "").strip()
+        tags = (getattr(settings, "langsmith_tags", "") or "").strip()
+
+        if tracing_on:
+            # LangSmith + LangChain tracing flags (support both)
+            os.environ.setdefault("LANGSMITH_TRACING", "true")
+            os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+
+            # Project name (support both)
+            if project:
+                os.environ.setdefault("LANGCHAIN_PROJECT", project)
+                os.environ.setdefault("LANGSMITH_PROJECT", project)
+                os.environ.setdefault("LANGSMITH_PROJECT_NAME", project)
+
+            # Optional tags (comma-separated)
+            if tags:
+                os.environ.setdefault("LANGSMITH_TAGS", tags)
+                os.environ.setdefault("LANGCHAIN_TAGS", tags)
+    except Exception:
+        pass
     logger.info(
         "startup: loaded settings. llm_provider=%s llm_model=%s run_consumer=%s run_migrations=%s",
         settings.llm_provider,
@@ -118,8 +141,8 @@ def admin_trigger(request: Request, payload: WebhookPayload, async_run: bool = F
     p = payload.model_dump(exclude_none=True)
 
     if async_run:
-        from .worker_tasks import enqueue_event_task
-        out = enqueue_event_task(p, queue_name=(settings.consumer_queues or "default").split(",")[0].strip() or "default")
+        from .queue import enqueue_event_task
+        out = enqueue_event_task(settings, p, queue_name=(settings.consumer_queues or "default").split(",")[0].strip() or "default")
         return {"ok": True, "enqueued": True, "job": out}
 
     result = run_event_graph(settings, p)
@@ -132,11 +155,11 @@ def admin_enqueue(request: Request, payload: WebhookPayload, queue: str = "defau
     Useful for production + load testing without blocking the web worker.
     """
     settings = _get_settings(request)
-    from .worker_tasks import enqueue_event_task
+    from .queue import enqueue_event_task
 
     p = payload.model_dump(exclude_none=True)
     q = (queue or "").strip() or (settings.consumer_queues or "default").split(",")[0].strip() or "default"
-    out = enqueue_event_task(p, queue_name=q)
+    out = enqueue_event_task(settings, p, queue_name=q)
     return {"ok": True, "job": out}
 
 @app.post("/admin/migrate")

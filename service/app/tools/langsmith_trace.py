@@ -7,6 +7,80 @@ from typing import Any, Callable, Dict, Iterator, Optional, TypeVar
 
 T = TypeVar("T")
 
+def _truncate_str(s: str, max_len: int = 2000) -> str:
+    s = s or ""
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + "…[TRUNCATED]"
+
+def _is_langchain_tool(x: Any) -> bool:
+    # Avoid importing langchain in all environments; use duck-typing
+    try:
+        return x.__class__.__name__ in ("StructuredTool", "Tool") and hasattr(x, "name")
+    except Exception:
+        return False
+
+def _tool_brief(x: Any) -> Dict[str, Any]:
+    try:
+        return {
+            "tool": True,
+            "name": getattr(x, "name", None),
+            "description": _truncate_str(str(getattr(x, "description", "") or ""), 500),
+        }
+    except Exception:
+        return {"tool": True, "name": "unknown"}
+
+def _jsonable(x: Any, *, depth: int = 0, max_depth: int = 4, max_list: int = 50) -> Any:
+    """
+    Convert arbitrary objects into JSON-serializable shapes.
+    This prevents LangSmith from trying model_dump_json on unsupported objects.
+    """
+    if x is None or isinstance(x, (bool, int, float)):
+        return x
+
+    if isinstance(x, str):
+        return _truncate_str(x, 4000)
+
+    if isinstance(x, bytes):
+        return {"bytes": True, "len": len(x)}
+
+    # Pydantic v2 BaseModel or compatible
+    if hasattr(x, "model_dump") and callable(getattr(x, "model_dump")):
+        try:
+            return _jsonable(x.model_dump(), depth=depth + 1, max_depth=max_depth, max_list=max_list)
+        except Exception:
+            return {"pydantic": True, "type": x.__class__.__name__}
+
+    # LangChain tools / StructuredTool
+    if _is_langchain_tool(x):
+        return _tool_brief(x)
+
+    if depth >= max_depth:
+        # stop recursion, but keep type info
+        return {"type": x.__class__.__name__}
+
+    if isinstance(x, dict):
+        out: Dict[str, Any] = {}
+        # keep only a reasonable number of keys to avoid huge trace payloads
+        for i, (k, v) in enumerate(x.items()):
+            if i >= 200:
+                out["…"] = "TRUNCATED_KEYS"
+                break
+            out[str(k)] = _jsonable(v, depth=depth + 1, max_depth=max_depth, max_list=max_list)
+        return out
+
+    if isinstance(x, (list, tuple, set)):
+        xs = list(x)
+        if len(xs) > max_list:
+            xs = xs[:max_list] + ["…TRUNCATED_LIST"]
+        return [_jsonable(v, depth=depth + 1, max_depth=max_depth, max_list=max_list) for v in xs]
+
+    # Fallback: string form
+    try:
+        return _truncate_str(str(x), 2000)
+    except Exception:
+        return {"type": x.__class__.__name__}
+    
 def _is_settings_like(x: Any) -> bool:
     return hasattr(x, "__class__") and x.__class__.__name__ == "Settings"
 
@@ -74,65 +148,67 @@ def _scrub_state(x: Any) -> Any:
 
 def _safe_process_inputs(args: Any, kwargs: Any) -> Dict[str, Any]:
     """
-    LangSmith 'traceable' supports process_inputs in many versions.
-    We normalize args/kwargs into a safe dict.
+    Normalize args/kwargs into a SAFE, JSON-serializable dict.
     """
     safe_args: list[Any] = []
     for a in list(args or []):
         if _is_settings_like(a):
-            safe_args.append(_scrub_settings(a))
+            safe_args.append(_jsonable(_scrub_settings(a)))
         elif isinstance(a, dict) and ("payload" in a or "event_type" in a or "run_id" in a):
-            safe_args.append(_scrub_state(a))
+            safe_args.append(_jsonable(_scrub_state(a)))
         else:
-            safe_args.append(a)
+            safe_args.append(_jsonable(a))
 
-    # kwargs can be large too; keep as-is but scrub obvious state/settings
     safe_kwargs: Dict[str, Any] = {}
     for k, v in (kwargs or {}).items():
         if _is_settings_like(v):
-            safe_kwargs[k] = _scrub_settings(v)
+            safe_kwargs[str(k)] = _jsonable(_scrub_settings(v))
         elif isinstance(v, dict) and ("payload" in v or "event_type" in v or "run_id" in v):
-            safe_kwargs[k] = _scrub_state(v)
+            safe_kwargs[str(k)] = _jsonable(_scrub_state(v))
         else:
-            safe_kwargs[k] = v
+            safe_kwargs[str(k)] = _jsonable(v)
+
     return {"args": safe_args, "kwargs": safe_kwargs}
 
-
 def _safe_process_outputs(out: Any) -> Any:
-    if isinstance(out, dict):
+    """
+    Ensure outputs are JSON-serializable and don't leak blobs.
+    """
+    o = _jsonable(out)
+
+    if isinstance(o, dict):
         banned = {"images", "image_bytes", "pdf_bytes", "raw_response", "raw", "content_b64", "image_b64"}
-        return {k: v for k, v in out.items() if k not in banned}
-    return out
+        return {k: v for k, v in o.items() if k not in banned}
+
+    return o
 
 
-def flush_traces() -> None:
-    """
-    Force flush in long-running workers/web containers so runs don't remain 'running' in UI.
-    Safe no-op if not supported.
-    """
-    
-    if not enabled():
-        return
-    try:
-        import langsmith as ls  # type: ignore
-        Client = getattr(ls, "Client", None)
-        if Client:
-            Client().flush()
-    except Exception:
-        pass
 
 def _truthy(v: str) -> bool:
     return (v or "").strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def enabled() -> bool:
+    # API key is required
     ls_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or ""
     if not ls_key.strip():
         return False
+
+    # Prefer LangSmith flag, but accept LangChain v2 flag as well
+    # Docs commonly show: LANGSMITH_TRACING=true
     if _truthy(os.getenv("LANGSMITH_TRACING", "")):
         return True
+
+    # Some setups still use this (LangChain v2 tracing flag)
     if _truthy(os.getenv("LANGCHAIN_TRACING_V2", "")):
         return True
+
+    # Back-compat: some users set LANGSMITH_TRACING_V2 or LANGCHAIN_TRACING
+    if _truthy(os.getenv("LANGSMITH_TRACING_V2", "")):
+        return True
+    if _truthy(os.getenv("LANGCHAIN_TRACING", "")):
+        return True
+
     return False
 
 
@@ -153,16 +229,23 @@ def _tags_env() -> list[str]:
 def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callable[..., T]:
     """
     Wrap any function into a LangSmith span, if tracing is enabled.
-    Sanitizes args/outputs so runs always finalize (prevents spinner / "running" forever).
-    If tracing is disabled OR langsmith isn't installed, returns original fn.
+
+    Compatibility goal:
+    - Some LangSmith versions call process_inputs(inputs_dict)
+    - Others call process_inputs(args, kwargs)
+    We support both without throwing TypeError.
     """
     if not enabled():
         return fn
 
+    # langsmith moved/aliased traceable across versions; support both.
     try:
         from langsmith import traceable  # type: ignore
     except Exception:
-        return fn
+        try:
+            from langsmith.run_helpers import traceable  # type: ignore
+        except Exception:
+            return fn
 
     def _wrapped(*args: Any, **kwargs: Any) -> T:
         return fn(*args, **kwargs)
@@ -172,31 +255,35 @@ def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callabl
     except Exception:
         pass
 
+    def _process_inputs_compat(*p: Any, **k: Any) -> Dict[str, Any]:
+        # Variant A: process_inputs(inputs_dict)
+        if len(p) == 1 and not k and isinstance(p[0], dict):
+            inputs = p[0]
+            a = inputs.get("args", [])
+            kw = inputs.get("kwargs", {})
+            return _safe_process_inputs(a, kw)
+
+        # Variant B: process_inputs(args, kwargs)
+        if len(p) == 2 and not k:
+            return _safe_process_inputs(p[0], p[1])
+
+        # Variant C: process_inputs(*args, **kwargs) (rare)
+        return _safe_process_inputs(p, k)
+
     try:
         return traceable(
             run_type=run_type,
             name=name,
-            process_inputs=lambda args, kwargs: _safe_process_inputs(args, kwargs),
+            process_inputs=_process_inputs_compat,
             process_outputs=_safe_process_outputs,
         )(_wrapped)  # type: ignore[return-value]
     except TypeError:
+        # Older traceable without process_inputs/process_outputs support
         return traceable(run_type=run_type, name=name)(_wrapped)  # type: ignore[return-value]
-
 
 @contextmanager
 def tracing_context(metadata: Optional[Dict[str, Any]] = None) -> Iterator[None]:
     if not enabled():
-        yield
-        return
-
-    try:
-        import langsmith as ls  # type: ignore
-    except Exception:
-        yield
-        return
-
-    ctx = getattr(ls, "tracing_context", None)
-    if not ctx:
         yield
         return
 
@@ -206,24 +293,62 @@ def tracing_context(metadata: Optional[Dict[str, Any]] = None) -> Iterator[None]
     if tags:
         md.setdefault("tags", tags)
 
-    with ctx(project=project, metadata=md):
-        yield
+    # Support both:
+    # - from langsmith import tracing_context
+    # - import langsmith as ls; ls.tracing_context
+    try:
+        from langsmith import tracing_context as _ctx  # type: ignore
+    except Exception:
+        try:
+            import langsmith as ls  # type: ignore
+            _ctx = getattr(ls, "tracing_context", None)
+        except Exception:
+            _ctx = None
 
+    if not _ctx:
+        yield
+        return
+
+    with _ctx(project=project, metadata=md):
+        yield
 
 def flush_traces() -> None:
     """
     Force flush in long-running workers/web containers so runs don't remain 'running' in UI.
     Safe no-op if not supported.
+
+    Different LangSmith versions expose flush in different places; try the common ones.
     """
     if not enabled():
         return
+
+    # 1) Newer-style flush utility (if present)
+    try:
+        import langsmith as ls  # type: ignore
+        utils = getattr(ls, "utils", None)
+        tracing = getattr(utils, "tracing", None) if utils else None
+        flush_fn = getattr(tracing, "flush", None) if tracing else None
+        if callable(flush_fn):
+            flush_fn()
+            return
+    except Exception:
+        pass
+
+    # 2) Client().flush() (older)
     try:
         import langsmith as ls  # type: ignore
         Client = getattr(ls, "Client", None)
         if Client:
-            Client().flush()
+            c = Client()
+            flush = getattr(c, "flush", None)
+            if callable(flush):
+                flush()
+                return
     except Exception:
         pass
+
+    # 3) Nothing available -> no-op
+    return
 
 def mk_http_meta(
     *,

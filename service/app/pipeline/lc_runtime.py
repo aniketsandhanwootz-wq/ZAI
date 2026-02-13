@@ -41,16 +41,51 @@ def lc_invoke(
     """
     logs = _ensure_logs(state)
 
+    # Helpful tracing metadata (SAFE + small)
+    run_id = state.get("run_id") or state.get("idempotency_primary_id") or ""
+    tenant_id = state.get("tenant_id") or ""
+    primary_id = state.get("primary_id") or state.get("checkin_id") or state.get("legacy_id") or ""
+
+    # Wrap each tool call in a context so spans nest consistently
+    try:
+        from ..tools.langsmith_trace import tracing_context, flush_traces
+    except Exception:
+        tracing_context = None  # type: ignore
+        flush_traces = None  # type: ignore
+
+    meta = {
+        "zai": {
+            "tool_name": tool_name,
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "primary_id": primary_id,
+            "event_type": state.get("event_type") or (state.get("payload") or {}).get("event_type"),
+        }
+    }
+
+    def _with_ctx(fn):
+        if tracing_context:
+            with tracing_context(meta):
+                return fn()
+        return fn()
+
     # Preferred: ToolRegistry
     if hasattr(tools_or_registry, "invoke") and callable(getattr(tools_or_registry, "invoke")):
         try:
-            resp = tools_or_registry.invoke(tool_name, args or {})
+            resp = _with_ctx(lambda: tools_or_registry.invoke(tool_name, args or {}))
         except Exception as e:
             msg = f"lc_invoke: registry crashed for '{tool_name}': {e}"
             logs.append(msg)
             if fatal:
                 raise
             return default
+
+        # Opportunistic flush helps prevent "running" traces on workers
+        try:
+            if flush_traces:
+                flush_traces()
+        except Exception:
+            pass
 
         if isinstance(resp, dict) and resp.get("ok") is True:
             return resp.get("result")
@@ -74,13 +109,19 @@ def lc_invoke(
         return default
 
     try:
-        resp = t.invoke(args or {})
+        resp = _with_ctx(lambda: t.invoke(args or {}))
     except Exception as e:
         msg = f"lc_invoke: tool '{tool_name}' invoke crashed: {e}"
         logs.append(msg)
         if fatal:
             raise
         return default
+
+    try:
+        if flush_traces:
+            flush_traces()
+    except Exception:
+        pass
 
     if not isinstance(resp, dict):
         msg = f"lc_invoke: tool '{tool_name}' returned non-dict"

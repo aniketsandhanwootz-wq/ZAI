@@ -5,7 +5,7 @@ import base64
 import json
 import os
 from typing import Any, Dict, List
-from .langsmith_trace import traceable_wrap
+from .langsmith_trace import traceable_wrap, tracing_context, mk_http_meta
 import requests
 
 from ..config import Settings
@@ -74,7 +74,8 @@ class LLMTool:
                 return data["choices"][0]["message"]["content"].strip()
 
             traced = traceable_wrap(_call, name="llm.openai_compat.generate_text", run_type="llm")
-            return traced()
+            with tracing_context(mk_http_meta(url=url, method="POST", provider="openai_compat", model=self.settings.llm_model, timeout_s=120)):
+                return traced()
 
         if provider == "gemini":
             base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
@@ -101,7 +102,9 @@ class LLMTool:
                 return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
 
             traced = traceable_wrap(_call, name="llm.gemini.generate_text", run_type="llm")
-            return traced()
+            # mk_http_meta strips querystring (key=...) so we never leak it to traces
+            with tracing_context(mk_http_meta(url=url, method="POST", provider="gemini", model=model, timeout_s=120)):
+                return traced()
 
         raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
 
@@ -154,4 +157,5 @@ class LLMTool:
             return _extract_json(text)
 
         traced = traceable_wrap(_call, name="llm.gemini.generate_json_with_images", run_type="llm")
-        return traced()
+        with tracing_context(mk_http_meta(url=url, method="POST", provider="gemini", model=model, timeout_s=180)):
+            return traced()
