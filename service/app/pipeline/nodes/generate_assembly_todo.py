@@ -8,7 +8,7 @@ import json
 import hashlib
 import secrets
 import string
-
+from ...tools.zai_cues_log_tool import ZaiCuesLogTool, ZaiCuesLogRow
 from ...config import Settings
 from ...tools.sheets_tool import SheetsTool, _key, _norm_value
 from ...tools.llm_tool import LLMTool
@@ -304,7 +304,56 @@ def _project_chips_from_10(cues10: List[str]) -> str:
 def _is_mfg(status: str) -> bool:
     return (status or "").strip().lower() == "mfg"
 
+def _log_cues_event(
+    *,
+    settings: Settings,
+    state: Dict[str, Any],
+    legacy_id: str,
+    tenant_id: str,
+    status_assembly: str,
+    skipped: bool,
+    skip_reason: str,
+    cues10: Optional[List[str]] = None,
+    chips: str = "",
+    rerank_used: bool = False,
+) -> None:
+    """
+    Best-effort logging to separate ZAI_CUES_LOG spreadsheet.
+    Never raises.
+    """
+    try:
+        tool = ZaiCuesLogTool(settings)
+        if not tool.enabled():
+            return
 
+        event_type = str(state.get("event_type") or (state.get("payload") or {}).get("event_type") or "").strip()
+        run_id = str(state.get("run_id") or "").strip()
+        primary_id = str(state.get("primary_id") or "").strip()
+        idem = str(state.get("idempotency_primary_id") or "").strip()
+
+        cues10_json = ""
+        if cues10 is not None:
+            # keep it simple + stable
+            cues10_json = json.dumps([str(x) for x in (cues10 or [])], ensure_ascii=False)
+
+        row = ZaiCuesLogRow(
+            timestamp_ist=_now_timestamp_str(),
+            event_type=event_type,
+            run_id=run_id,
+            primary_id=primary_id,
+            idempotency_primary_id=idem,
+            tenant_id=str(tenant_id or "").strip(),
+            legacy_id=str(legacy_id or "").strip(),
+            status_assembly=str(status_assembly or "").strip(),
+            skipped=bool(skipped),
+            skip_reason=str(skip_reason or "").strip(),
+            rerank_used=bool(rerank_used),
+            cues10_json=cues10_json,
+            chips=str(chips or "").strip(),
+        )
+        tool.append_row(row)
+    except Exception as e:
+        (state.get("logs") or []).append(f"zai_cues_log: non-fatal failure: {e}")
 # -------------------------
 # Main node
 # -------------------------
@@ -313,23 +362,56 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     payload = state.get("payload") or {}
     legacy_id = _norm_value(payload.get("legacy_id") or state.get("legacy_id") or "")
     if not legacy_id:
-        (state.get("logs") or []).append("assembly_todo: missing legacy_id; skipped")
+        msg = "assembly_todo: missing legacy_id; skipped"
+        (state.get("logs") or []).append(msg)
         state["assembly_todo_skipped"] = True
+        _log_cues_event(
+            settings=settings,
+            state=state,
+            legacy_id="",
+            tenant_id="",
+            status_assembly="",
+            skipped=True,
+            skip_reason=msg,
+            rerank_used=False,
+        )
         return state
 
     sheets = SheetsTool(settings)
 
     pr = sheets.get_project_by_legacy_id(legacy_id)
     if not pr:
-        (state.get("logs") or []).append(f"assembly_todo: project row not found for legacy_id={legacy_id}; skipped")
+        msg = f"assembly_todo: project row not found for legacy_id={legacy_id}; skipped"
+        (state.get("logs") or []).append(msg)
         state["assembly_todo_skipped"] = True
+        _log_cues_event(
+            settings=settings,
+            state=state,
+            legacy_id=legacy_id,
+            tenant_id="",
+            status_assembly="",
+            skipped=True,
+            skip_reason=msg,
+            rerank_used=False,
+        )
         return state
 
     k_status = _key(sheets.map.col("project", "status_assembly"))
     status_val = _norm_value(pr.get(k_status, ""))
     if not _is_mfg(status_val):
-        (state.get("logs") or []).append(f"assembly_todo: status_assembly='{status_val}' != 'mfg'; skipped")
+        msg = f"assembly_todo: status_assembly='{status_val}' != 'mfg'; skipped"
+        (state.get("logs") or []).append(msg)
         state["assembly_todo_skipped"] = True
+        _log_cues_event(
+            settings=settings,
+            state=state,
+            legacy_id=legacy_id,
+            tenant_id="",
+            status_assembly=status_val,
+            skipped=True,
+            skip_reason=msg,
+            rerank_used=False,
+        )
         return state
 
     k_pname = _key(sheets.map.col("project", "project_name"))
@@ -349,10 +431,19 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     dispatch_date_str = _norm_value(pr.get(k_dispatch, "")) if k_dispatch else ""
 
     if not tenant_id:
-        (state.get("logs") or []).append(
-            f"assembly_todo: missing tenant_id(company_row_id) for legacy_id={legacy_id}; skipped"
-        )
+        msg = f"assembly_todo: missing tenant_id(company_row_id) for legacy_id={legacy_id}; skipped"
+        (state.get("logs") or []).append(msg)
         state["assembly_todo_skipped"] = True
+        _log_cues_event(
+            settings=settings,
+            state=state,
+            legacy_id=legacy_id,
+            tenant_id="",
+            status_assembly=status_val,
+            skipped=True,
+            skip_reason=msg,
+            rerank_used=False,
+        )
         return state
 
     query_text = (
@@ -370,8 +461,19 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     try:
         q = embedder.embed_query(query_text)
     except Exception as e:
-        (state.get("logs") or []).append(f"assembly_todo: embed_query failed: {e}")
+        msg = f"assembly_todo: embed_query failed: {e}"
+        (state.get("logs") or []).append(msg)
         state["assembly_todo_skipped"] = True
+        _log_cues_event(
+            settings=settings,
+            state=state,
+            legacy_id=legacy_id,
+            tenant_id=tenant_id,
+            status_assembly=status_val,
+            skipped=True,
+            skip_reason=msg,
+            rerank_used=False,
+        )
         return state
 
     problems = vector_db.search_incidents(
@@ -486,6 +588,19 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
     state["assembly_todo_chips"] = chips
     state["assembly_todo_cues10"] = cues10
 
+    # --- ZAI Cues Log (best-effort) ---
+    _log_cues_event(
+        settings=settings,
+        state=state,
+        legacy_id=legacy_id,
+        tenant_id=tenant_id,
+        status_assembly=status_val,
+        skipped=False,
+        skip_reason="",
+        cues10=cues10,
+        chips=chips,
+        rerank_used=True,
+    )
     if ok:
         (state.get("logs") or []).append(f"assembly_todo: wrote chips to Project.ai_critcal_point legacy_id={legacy_id}")
     else:

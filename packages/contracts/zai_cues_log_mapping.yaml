@@ -1,0 +1,18 @@
+version: 1
+
+zai_cues_log:
+  tab: "ZAI_CUES_LOG"
+  columns:
+    - "Timestamp IST"
+    - "Event Type"
+    - "Run ID"
+    - "Primary ID"
+    - "Idempotency Primary ID"
+    - "Tenant ID"
+    - "Legacy ID"
+    - "Status Assembly"
+    - "Skipped"
+    - "Skip Reason"
+    - "Rerank Used"
+    - "Cues10 JSON"
+    - "Chips"

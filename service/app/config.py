@@ -219,6 +219,11 @@ class Settings:
     additional_photos_spreadsheet_id: str
     additional_photos_tab_name: str
 
+    # ZAI Cues Log (separate spreadsheet)
+    zai_cues_log_enabled: bool
+    zai_cues_log_spreadsheet_id: str
+    zai_cues_log_tab_name: str
+
     # Drive
     google_drive_root_folder_id: str
     google_drive_annotated_folder_id: str
@@ -444,6 +449,10 @@ def load_settings() -> Settings:
     glide_boughtouts_project_row_id_column = ov["glide_boughtouts_project_row_id_column"]
     glide_boughtouts_title_column = ov["glide_boughtouts_title_column"]
     sheets_mapping_path = _get_env("SHEETS_MAPPING_PATH", "packages/contracts/sheets_mapping.yaml")    
+    # ZAI Cues Log (new spreadsheet)
+    zai_cues_log_enabled = _get_env("ZAI_CUES_LOG_ENABLED", "0").lower() in ("1", "true", "yes", "y")
+    zai_cues_log_spreadsheet_id = _get_env("ZAI_CUES_LOG_SHEET_ID", "").strip()
+    zai_cues_log_tab_name = _get_env("ZAI_CUES_LOG_TAB_NAME", "ZAI_CUES_LOG").strip() or "ZAI_CUES_LOG"
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
@@ -529,6 +538,10 @@ def load_settings() -> Settings:
         langsmith_tracing=langsmith_tracing,
         langsmith_project=langsmith_project,
         langsmith_tags=langsmith_tags,
+
+        zai_cues_log_enabled=zai_cues_log_enabled,
+        zai_cues_log_spreadsheet_id=zai_cues_log_spreadsheet_id,
+        zai_cues_log_tab_name=zai_cues_log_tab_name,
     )
 
 
