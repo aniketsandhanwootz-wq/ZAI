@@ -11,7 +11,10 @@ from ...integrations.teams_client import TeamsClient
 from ...tools.company_tool import CompanyTool, normalize_company_key, normalize_company_name
 from ...tools.db_tool import DBTool
 from ...integrations.appsheet_client import AppSheetClient
-
+# Photo column policy:
+# - if annotated image exists: use annotated url
+# - else: use default "AI" placeholder image (never use raw checkin image)
+DEFAULT_PHOTO_URL = "https://res.cloudinary.com/dbwg6zz3l/image/upload/v1754853892/AI_jckkjg.png"
 
 def _payload_hash(payload: dict) -> str:
     b = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -96,6 +99,7 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     annotated_urls = state.get("annotated_image_urls") or []
+    annotated_urls = annotated_urls if isinstance(annotated_urls, list) else []
 
     # ---- Grounding: citations + edge refs ----
     citations, edge_refs = _extract_grounding_from_state(state)
@@ -104,11 +108,21 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     # Keep a clean reply for Teams formatting
     reply_clean = reply
 
-    # AppSheet Image column expects a single URL (best: direct image URL)
-    photos_cell = ""
-    if isinstance(annotated_urls, list) and annotated_urls:
-        photos_cell = str(annotated_urls[0]).strip()  # only 1 for Photo column
-        reply_for_sheet = reply_clean + "\n\nAnnotated images:\n" + "\n".join([f"- {u}" for u in annotated_urls[:3]])
+    # AppSheet Photo column policy:
+    # - annotated available -> use it
+    # - else -> default placeholder image
+    first_annotated = ""
+    for u in annotated_urls:
+        su = str(u or "").strip()
+        if su:
+            first_annotated = su
+            break
+
+    photos_cell = first_annotated or DEFAULT_PHOTO_URL
+
+    # Remarks: include annotated list only if annotated exists
+    if first_annotated:
+        reply_for_sheet = reply_clean + "\n\nAnnotated images:\n" + "\n".join([f"- {str(u).strip()}" for u in annotated_urls[:3] if str(u).strip()])
     else:
         reply_for_sheet = reply_clean
 
