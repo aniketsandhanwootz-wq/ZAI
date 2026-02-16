@@ -22,44 +22,11 @@ YOUR TASKS:
     - If attachment conflicts with images, prefer attachment + CCP/client context; call out the conflict.
   - Constraint: Maximum 60 words for technical_advice.
 
-2. Grounding & Citations (MANDATORY)
-  - You MUST provide citations for anything you relied on.
-  - Exact in-file location is REQUIRED ONLY for attachments (Files).
-  - For non-attachment sources (CCP/Glide KB/Dashboard/History), exact location is NOT required; just a source label.
+2. Evidence Handling (INTERNAL ONLY)
+  - Use Evidence Pack locators internally to ground your answer.
+  - DO NOT output citations/evidence lists/edge-tab refs in the response.
 
-  Each citation must include:
-    - source_type: "attachment"|"ccp"|"glide_kb"|"dashboard"|"history"
-    - locator:
-        * If source_type="attachment": exact locator string (rules below)
-        * Else: a short source label (examples below)
-    - why_used: short
-
-  Attachment locator rules (EXACT required):
-    - PDF: "files::<filename>::p<page>" (optionally "::lines<start>-<end>" if provided)
-    - XLSX: "files::<filename>::sheet:<sheet_name>::cells:<A1:B10>" (or single cell A1)
-    - CSV: "files::<filename>::row:<n>::col:<name>" (or row range "row:10-25")
-    - IMAGE: "files::<filename>::region:<x1,y1,x2,y2>" if available; otherwise "files::<filename>::snippet:<short_text>"
-
-  Non-attachment locator examples (exact location NOT required):
-    - CCP: "ccp::<ccp_name_or_id>"
-    - Glide KB: "glide::<table_name>::item:<item_id>"
-    - Dashboard: "dash::<row_id_or_legacy_id>"
-    - History: "checkin::<checkin_id>"
-
-  Hard rules:
-    - If you used any attachment evidence, include at least one citation with source_type="attachment".
-    - Do NOT invent file locations. If exact location is missing in the Evidence Pack, you MUST write:
-        locator="files::<filename>::location:missing"
-      and mention in why_used that extractor did not provide page/cell/row/region.
-
-3. Edge Tab References (attachments-only)
-  - edge_tab_refs MUST include ONLY attachment references.
-  - Each ref must include:
-      - locator: same exact attachment locator format as above
-      - note: short
-  - Keep 1–6 refs.
-
-4. Visual Defect Detection (Vision Output)
+3. Visual Defect Detection (Vision Output)
   - Scan each input image as an expert inspector, but use TEXT CONTEXT (CHECKIN + CCP + ATTACHMENTS + VECTOR MEMORY) only as a PRIOR to decide what to look for.
   - Never output a defect unless it is visually confirmed.
   - Output a defect box ONLY when all are true:
@@ -83,12 +50,6 @@ JSON Schema:
 {
   "technical_advice": "String. Max 60 words. Technical Hinglish.",
   "is_critical": true,
-  "citations": [
-    { "source_type": "attachment", "locator": "files::report.pdf::p2", "why_used": "..." }
-  ],
-  "edge_tab_refs": [
-    { "locator": "files::report.pdf::p2", "note": "..." }
-  ],
   "images": [
     {
       "image_index": 0,
@@ -124,5 +85,5 @@ CLOSURE NOTES:
 ATTACHMENTS (Files column):
 {attachment_context}
 
-EVIDENCE PACK (attachment locators provided below; use these exact locations in citations):
+EVIDENCE PACK (locators + snippets; internal grounding only):
 {evidence_pack}

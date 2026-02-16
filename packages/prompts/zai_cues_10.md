@@ -17,6 +17,8 @@
 
 - **PREVIOUS_CHIPS:** {{previous_chips}}
 
+- **TARGET_LEGACY_ID:** {{legacy_id}}
+
 **Workflow sequencing rule (Do NOT output random checks):**
 Make the 10 cues flow like a natural workflow:
 1-3: Visual/Touch (surface, edges, burr, scratches)  
@@ -69,3 +71,6 @@ Make the 10 cues flow like a natural workflow:
 4) Avoid duplicates (same idea reworded is also duplicate).  
 5) Each cue <= 10 words. Use shopfloor language.  
 6) Workflow order must be followed (1-3, 4-6, 7-9, 10).
+7) Cues MUST be ONLY for TARGET_LEGACY_ID.  
+8) Do NOT mention any other part/legacy_id/project in cues.  
+9) If context contains other parts, use them only to analyse the situation but don't write cues considering them as part of this project .

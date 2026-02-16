@@ -68,6 +68,35 @@ def _as_list_of_dicts(x: Any) -> List[Dict[str, Any]]:
             out.append(it)
     return out
 
+def _strip_evidence_blocks(text: str) -> str:
+    """
+    Safety sanitizer for fallback text generation.
+    Ensures the final ai_reply never contains "EVIDENCE / EDGE TAB REFS" blocks.
+    """
+    if not text:
+        return ""
+
+    s = text.strip()
+
+    # Cut off at common evidence markers if model ignores constraints.
+    cut_markers = [
+        "\nEVIDENCE",
+        "\nEVIDENCE (",
+        "\nEDGE TAB REFS",
+        "\nEDGE TAB REFERENCES",
+        "\nCITATIONS",
+        "\nREFERENCES",
+    ]
+    cut_at = None
+    for m in cut_markers:
+        i = s.find(m)
+        if i != -1:
+            cut_at = i if cut_at is None else min(cut_at, i)
+
+    if cut_at is not None:
+        s = s[:cut_at].strip()
+
+    return s
 
 def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     tenant_id = (state.get("tenant_id") or "").strip()
@@ -101,10 +130,10 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
     if attachment_context:
         attachment_context = "ATTACHMENT CONTEXT (from Files):\n" + attachment_context.strip()
 
-    # Evidence index text (cite tokens)
-    evidence_index_text = (state.get("evidence_index_text") or "").strip()
-    if evidence_index_text:
-        evidence_index_text = "EVIDENCE INDEX:\n" + evidence_index_text.strip()
+    # Evidence pack text (locators + snippets) used for grounding only
+    evidence_pack_text = (state.get("evidence_index_text") or "").strip()
+    if evidence_pack_text:
+        evidence_pack_text = "EVIDENCE PACK:\n" + evidence_pack_text.strip()
 
     template = _load_prompt_template()
     prompt = _render_template_safe(
@@ -115,15 +144,15 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             "closure_notes": closure_notes,
             "company_context": company_context,
             "attachment_context": attachment_context,
-            "evidence_index": evidence_index_text,
+            "evidence_pack": evidence_pack_text,
         },
     )
 
     # Backward-safe: if template missing any of these placeholders, append them.
     if attachment_context and "{attachment_context}" not in template:
         prompt = (prompt.strip() + "\n\n" + attachment_context.strip()).strip()
-    if evidence_index_text and "{evidence_index}" not in template:
-        prompt = (prompt.strip() + "\n\n" + evidence_index_text.strip()).strip()
+    if evidence_pack_text and "{evidence_pack}" not in template:
+        prompt = (prompt.strip() + "\n\n" + evidence_pack_text.strip()).strip()
 
     images = state.get("media_images") or []
     if not isinstance(images, list):
@@ -135,7 +164,8 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         out = llm.generate_json_with_images(prompt=prompt, images=images, temperature=0.0)
     except Exception as e:
         state.setdefault("logs", []).append(f"LLM JSON+images failed: {e}")
-        state["ai_reply"] = llm.generate_text(prompt).strip()
+        fallback = llm.generate_text(prompt).strip()
+        state["ai_reply"] = _strip_evidence_blocks(fallback)
         state["defects_by_image"] = []
         state["reply_citations"] = []
         state["edge_tab_refs"] = []
@@ -146,10 +176,8 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         technical = llm.generate_text(prompt).strip()
 
     # Optional fields (won't break existing flows)
-    citations = _as_list_of_dicts(out.get("citations"))
-    edge_refs = _as_list_of_dicts(out.get("edge_tab_refs"))
-    citations = citations[:12]
-    edge_refs = edge_refs[:6]
+    citations: List[Dict[str, Any]] = []
+    edge_refs: List[Dict[str, Any]] = []
     state["is_critical"] = _to_bool(out.get("is_critical"))
     state["ai_reply"] = technical
     state["defects_by_image"] = _normalize_images_defects(out.get("images"), len(images))

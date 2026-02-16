@@ -101,9 +101,11 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     annotated_urls = state.get("annotated_image_urls") or []
     annotated_urls = annotated_urls if isinstance(annotated_urls, list) else []
 
-    # ---- Grounding: citations + edge refs ----
     citations, edge_refs = _extract_grounding_from_state(state)
-    grounding_block = _format_grounding_block(citations, edge_refs)
+
+    # IMPORTANT: Do NOT show evidence/citations blocks in human-facing replies.
+    # Keep grounding only for internal audit (DB artifact), not for Remarks/Teams/n8n.
+    grounding_block = ""
 
     # Keep a clean reply for Teams formatting
     reply_clean = reply
@@ -126,9 +128,7 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     else:
         reply_for_sheet = reply_clean
 
-    # Append grounding block to Remarks (this is your “persistence” in sheet)
-    if grounding_block:
-        reply_for_sheet = (reply_for_sheet.strip() + "\n\n" + grounding_block).strip()
+    # Do not append grounding to Remarks. Keep Remarks clean.
 
     # ----------------------------
     # Conversation writeback (ALWAYS via AppSheet)
@@ -264,10 +264,6 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "created_by": state.get("checkin_created_by") or "",
                     "item_id": state.get("checkin_item_id") or "",
                     "checkin_images": state.get("checkin_image_urls") or [],
-
-                    # NEW: grounding payload for Edge tab writer
-                    "citations": citations,
-                    "edge_tab_refs": edge_refs,
                 }
 
                 # ---- Idempotency: avoid duplicate external posts ----
@@ -327,10 +323,6 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "status": state.get("checkin_status") or "",
                     "checkin_text": state.get("checkin_description") or "",
                     "created_by": state.get("checkin_created_by") or "",
-
-                    # NEW: grounding for downstream automation
-                    "citations": citations,
-                    "edge_tab_refs": edge_refs,
                 }
 
                 # Idempotency check
