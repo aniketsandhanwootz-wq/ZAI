@@ -1,4 +1,3 @@
-# service/app/pipeline/nodes/generate_ai_reply.py
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -23,6 +22,7 @@ def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
         out = out.replace("{" + k + "}", v or "")
     return out
 
+
 def _to_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
@@ -30,6 +30,7 @@ def _to_bool(v: Any) -> bool:
         return False
     s = str(v).strip().lower()
     return s in ("1", "true", "yes", "y")
+
 
 def _normalize_images_defects(raw: Any, image_count: int) -> List[Dict[str, Any]]:
     """
@@ -55,6 +56,16 @@ def _normalize_images_defects(raw: Any, image_count: int) -> List[Dict[str, Any]
     out: List[Dict[str, Any]] = []
     for i in range(max(0, int(image_count))):
         out.append(seen.get(i) or {"image_index": i, "defects": []})
+    return out
+
+
+def _as_list_of_dicts(x: Any) -> List[Dict[str, Any]]:
+    if not isinstance(x, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in x:
+        if isinstance(it, dict):
+            out.append(it)
     return out
 
 
@@ -85,10 +96,16 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             f"- What matters to them / constraints (from Glide): {company_desc or '(not provided)'}\n"
         ).strip()
 
-    # NEW: file attachment context (from analyze_attachments node)
+    # Attachments summary (human readable)
     attachment_context = (state.get("attachment_context") or "").strip()
     if attachment_context:
         attachment_context = "ATTACHMENT CONTEXT (from Files):\n" + attachment_context.strip()
+
+    # Evidence index text (cite tokens)
+    evidence_index_text = (state.get("evidence_index_text") or "").strip()
+    if evidence_index_text:
+        evidence_index_text = "EVIDENCE INDEX:\n" + evidence_index_text.strip()
+
     template = _load_prompt_template()
     prompt = _render_template_safe(
         template,
@@ -98,11 +115,16 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             "closure_notes": closure_notes,
             "company_context": company_context,
             "attachment_context": attachment_context,
+            "evidence_index": evidence_index_text,
         },
     )
 
+    # Backward-safe: if template missing any of these placeholders, append them.
     if attachment_context and "{attachment_context}" not in template:
         prompt = (prompt.strip() + "\n\n" + attachment_context.strip()).strip()
+    if evidence_index_text and "{evidence_index}" not in template:
+        prompt = (prompt.strip() + "\n\n" + evidence_index_text.strip()).strip()
+
     images = state.get("media_images") or []
     if not isinstance(images, list):
         images = []
@@ -115,15 +137,28 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         state.setdefault("logs", []).append(f"LLM JSON+images failed: {e}")
         state["ai_reply"] = llm.generate_text(prompt).strip()
         state["defects_by_image"] = []
+        state["reply_citations"] = []
+        state["edge_tab_refs"] = []
         return state
 
     technical = (out.get("technical_advice") or "").strip()
     if not technical:
         technical = llm.generate_text(prompt).strip()
 
+    # Optional fields (won't break existing flows)
+    citations = _as_list_of_dicts(out.get("citations"))
+    edge_refs = _as_list_of_dicts(out.get("edge_tab_refs"))
+    citations = citations[:12]
+    edge_refs = edge_refs[:6]
     state["is_critical"] = _to_bool(out.get("is_critical"))
     state["ai_reply"] = technical
     state["defects_by_image"] = _normalize_images_defects(out.get("images"), len(images))
 
-    state.setdefault("logs", []).append("Generated AI reply + defects (single prompt, multimodal)")
+    # NEW: persist full structured JSON for downstream writeback/persistence
+    # Batch-4 writeback expects ai_reply_json + citations + edge_tab_refs (exact keys).
+    state["ai_reply_json"] = out
+    state["citations"] = citations
+    state["edge_tab_refs"] = edge_refs
+
+    state.setdefault("logs", []).append("Generated AI reply + defects + citations (evidence-index grounded)")
     return state

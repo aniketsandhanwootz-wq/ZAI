@@ -16,12 +16,40 @@ def _drop_self(rows: List[Dict[str, Any]], self_checkin_id: str) -> List[Dict[st
     return [r for r in rows if str(r.get("checkin_id") or "").strip() != sid]
 
 
+def _compose_query_text(state: Dict[str, Any]) -> str:
+    """
+    Retrieval query should include the best signal:
+    - snapshot text
+    - checkin description (if not already embedded)
+    - attachment_context (summaries produced by analyze_attachments)
+    This improves correlation to project context + attachments.
+    """
+    parts: List[str] = []
+
+    snap = (state.get("thread_snapshot_text") or "").strip()
+    if snap:
+        parts.append("THREAD SNAPSHOT:\n" + snap)
+
+    desc = (state.get("checkin_description") or "").strip()
+    if desc and desc not in snap:
+        parts.append("CHECKIN DESCRIPTION:\n" + desc)
+
+    att_ctx = (state.get("attachment_context") or "").strip()
+    if att_ctx:
+        # keep bounded so embeddings stay stable
+        if len(att_ctx) > 6000:
+            att_ctx = att_ctx[:6000] + "\n[TRUNCATED]"
+        parts.append("ATTACHMENT EVIDENCE (Files column summaries):\n" + att_ctx)
+
+    return "\n\n".join([p for p in parts if p.strip()]).strip()
+
+
 def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     tenant_id = (state.get("tenant_id") or "").strip()
-    text = (state.get("thread_snapshot_text") or "").strip()
     checkin_id = (state.get("checkin_id") or "").strip()
 
-    if not tenant_id or not text:
+    query_text = _compose_query_text(state)
+    if not tenant_id or not query_text:
         (state.get("logs") or []).append("Skipping retrieval (missing tenant/text)")
         state["similar_problems"] = []
         state["similar_resolutions"] = []
@@ -29,15 +57,16 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
         state["relevant_ccp_chunks"] = []
         state["relevant_dashboard_updates"] = []
         state["relevant_glide_kb_chunks"] = []
+        state["retrieval_query_text"] = query_text
         return state
 
     embedder = EmbedTool(settings)
     vector_db = VectorTool(settings)
 
-    q = embedder.embed_query(text)
+    q = embedder.embed_query(query_text)
+    state["retrieval_query_text"] = query_text
 
     # 0) Company profile (tenant-scoped when tenant_id is known)
-    # tenant_id == company_row_id (Glide $rowID) per your Flow 1 truth
     try:
         if tenant_id:
             row = vector_db.get_company_profile_by_tenant_row_id(tenant_row_id=tenant_id)
@@ -58,7 +87,6 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
             else:
                 state["company_profile_matches"] = []
         else:
-            # Fallback only when tenant_id missing
             company_matches = vector_db.search_company_profiles(query_embedding=q, top_k=1)
             state["company_profile_matches"] = company_matches
             if company_matches:
@@ -69,10 +97,9 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
     except Exception as e:
         (state.get("logs") or []).append(f"Company profile retrieval failed (non-fatal): {e}")
         state["company_profile_matches"] = []
-        
+
     project_name = state.get("project_name")
     part_number = state.get("part_number")
-
     legacy_id = state.get("legacy_id")
 
     # 0.5) Glide KB chunks (RawMaterial/Processes/Boughtouts MUST be included)
@@ -96,7 +123,7 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
     critical = vector_db.search_glide_kb_chunks(
         tenant_id=tenant_id,
         query_embedding=q,
-        top_k=36,  # ~12 chunks per table-ish after rerank trims
+        top_k=36,
         project_name=project_name,
         part_number=part_number,
         legacy_id=legacy_id,
@@ -114,6 +141,7 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
     )
 
     state["relevant_glide_kb_chunks"] = _dedup_chunks((critical or []) + (general or []))
+
     # 1) Similar PROBLEMS
     problems = vector_db.search_incidents(
         tenant_id=tenant_id,
@@ -144,7 +172,6 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
         vector_type="MEDIA",
     )
 
-    # Exclude current checkin from all buckets
     problems = _drop_self(problems, checkin_id)
     resolutions = _drop_self(resolutions, checkin_id)
     media = _drop_self(media, checkin_id)
@@ -177,6 +204,7 @@ def retrieve_context(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any
     state["similar_incidents"] = problems[:10]
 
     (state.get("logs") or []).append(
-        f"Retrieved context: problems={len(problems)} resolutions={len(resolutions)} media={len(media)} ccp={len(ccp)} dash={len(dash)}"
+        "Retrieved context using composed query (snapshot+attachments): "
+        f"problems={len(problems)} resolutions={len(resolutions)} media={len(media)} ccp={len(ccp)} dash={len(dash)}"
     )
     return state

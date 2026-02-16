@@ -1,9 +1,8 @@
 # service/app/pipeline/nodes/analyze_attachments.py
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ...config import Settings
 from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
@@ -13,12 +12,17 @@ from ...tools.llm_tool import LLMTool
 from ...tools.vision_tool import VisionTool
 from ...tools.file_extractors.router import extract_any, sniff_mime, sha256_text, sha256_bytes
 
+from ...tools.attachments.evidence_builder import build_evidence_pack
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
+
 
 def _load_prompt_template() -> str:
     p = _repo_root() / "packages" / "prompts" / "attachment_analysis.md"
     return p.read_text(encoding="utf-8")
+
 
 def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
     out = template
@@ -26,12 +30,15 @@ def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
         out = out.replace("{" + k + "}", v or "")
     return out
 
+
 def _norm(s: str) -> str:
     return (s or "").strip()
+
 
 def _norm_header(s: str) -> str:
     import re
     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
 
 def _find_files_cell(checkin_row: Dict[str, Any]) -> str:
     """
@@ -55,6 +62,7 @@ def _find_files_cell(checkin_row: Dict[str, Any]) -> str:
                 return v
     return ""
 
+
 def _make_checkin_context(state: Dict[str, Any]) -> str:
     lines = []
     lines.append(f"tenant_id: {_norm(str(state.get('tenant_id') or ''))}")
@@ -73,16 +81,39 @@ def _make_checkin_context(state: Dict[str, Any]) -> str:
         lines.append(snap[:6000])
     return "\n".join(lines).strip()
 
+
+def _stable_dedupe(refs: List[str]) -> List[str]:
+    """
+    Deterministic ordering + dedupe.
+    We do not want random ordering from Sheets/AppSheet variations.
+    """
+    seen = set()
+    out = []
+    for r in refs:
+        k = (r or "").strip()
+        if not k:
+            continue
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(k)
+    # stable: sort by normalized string
+    out.sort(key=lambda x: x.lower())
+    return out
+
+
 def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     """
     Ingest + extract + analyze "Files" column attachments for the checkin.
-    - Idempotent (DB primary key)
-    - No reply side effects; reply node uses `state['attachment_context']` if present.
+
+    Batch-1 improvements:
+      - deterministic ref parsing (dedupe + sort)
+      - evidence_pack v1 persisted + exposed on state
+      - analysis prompt includes evidence_pack and forces evidence_refs
     """
     tenant_id = _norm(str(state.get("tenant_id") or ""))
     checkin_id = _norm(str(state.get("checkin_id") or ""))
 
-    # If we cannot associate to tenant/checkin, skip cleanly
     if not tenant_id or not checkin_id:
         state.setdefault("logs", []).append("analyze_attachments: skip (missing tenant_id/checkin_id)")
         return state
@@ -107,13 +138,15 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
         state.setdefault("logs", []).append("analyze_attachments: no Files found on checkin")
         state["attachment_context"] = ""
         state["attachments_analyzed"] = []
+        state["attachment_evidence"] = []
         return state
 
-    refs = split_cell_refs(files_cell)
+    refs = _stable_dedupe(split_cell_refs(files_cell))
     if not refs:
         state.setdefault("logs", []).append("analyze_attachments: Files present but no refs parsed")
         state["attachment_context"] = ""
         state["attachments_analyzed"] = []
+        state["attachment_evidence"] = []
         return state
 
     drive = DriveTool(settings)
@@ -127,22 +160,24 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
     checkin_ctx = _make_checkin_context(state)
 
     analyzed: List[Dict[str, Any]] = []
+    evidence_out: List[Dict[str, Any]] = []
     ctx_lines: List[str] = []
+
     processed = 0
     skipped = 0
 
     # Hard limit to prevent abuse / runaway
     max_files = int(meta.get("max_files") or 6)
+    max_bytes = int(meta.get("max_bytes") or 15_000_000)
 
     for ref in refs[:max_files]:
         att = resolver.resolve(ref)
         if not att:
             skipped += 1
             continue
-        max_bytes = int(meta.get("max_bytes") or 15_000_000)
+
         b = resolver.fetch_bytes(att, timeout=40, max_bytes=max_bytes)
         if not b:
-            # store minimal metadata anyway (so we know it failed)
             sh = sha256_text(att.source_ref)
             db.upsert_checkin_file_artifact(
                 tenant_id=tenant_id,
@@ -157,7 +192,7 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 content_hash="",
                 extracted_text="(Download failed.)",
                 extracted_json={"download_failed": True},
-                analysis_json={"matches_checkin": False, "summary": "Download failed.", "confidence": 0.0},
+                analysis_json={"matches_checkin": False, "summary": "Download failed.", "confidence": 0.0, "evidence_refs": []},
             )
             analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": False, "reason": "download_failed"})
             skipped += 1
@@ -165,10 +200,14 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
 
         # Strong idempotency: content hash
         content_hash = sha256_bytes(b)
-        # Prefer content-based source_hash so same file doesn't duplicate
         source_hash = content_hash
 
-        if db.checkin_file_artifact_exists(tenant_id=tenant_id, checkin_id=checkin_id, source_hash=source_hash, content_hash=content_hash):
+        if db.checkin_file_artifact_exists(
+            tenant_id=tenant_id,
+            checkin_id=checkin_id,
+            source_hash=source_hash,
+            content_hash=content_hash,
+        ):
             analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": True, "skipped": True})
             skipped += 1
             continue
@@ -181,17 +220,31 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
             mime_type=mime,
             data=b,
             vision_caption_fn=lambda image_bytes, mime_type, context="": vision.caption_for_retrieval(
-                image_bytes=image_bytes, mime_type=mime_type, context_hint=context
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                context_hint=context,
             ),
         )
 
-        # LLM analysis (use extracted_text, may be long -> truncate for prompt)
         attachment_text = (ex.extracted_text or "").strip()
         if len(attachment_text) > 20000:
             attachment_text_for_prompt = attachment_text[:20000] + "\n\n[TRUNCATED]"
         else:
             attachment_text_for_prompt = attachment_text
 
+        # Build Evidence Pack (v1)
+        extracted_json = ex.extracted_json or {}
+        evidence_pack = build_evidence_pack(
+            filename=att.name,
+            mime_type=mime,
+            doc_type=ex.doc_type,
+            content_hash=content_hash,
+            extracted_text=attachment_text,
+            extracted_json=extracted_json,
+        )
+        evidence_pack_dict = evidence_pack.to_dict()
+
+        # Prompt meta
         attachment_meta = {
             "filename": att.name,
             "mime_type": mime,
@@ -208,12 +261,15 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
             {
                 "checkin_context": checkin_ctx,
                 "attachment_meta": str(attachment_meta),
+                "evidence_pack": str(evidence_pack_dict),
                 "attachment_text": attachment_text_for_prompt,
             },
         )
 
         try:
             analysis = llm.generate_json_with_images(prompt=prompt, images=[], temperature=0.0)
+            if not isinstance(analysis, dict):
+                analysis = {"summary": "(LLM returned non-dict JSON)", "matches_checkin": False, "confidence": 0.0, "evidence_refs": []}
         except Exception as e:
             analysis = {
                 "doc_type": ex.doc_type,
@@ -225,10 +281,22 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 "measurements": [],
                 "actions": [],
                 "questions": [],
+                "evidence_refs": [],
                 "confidence": 0.0,
             }
 
-        # Persist
+        # Ensure evidence_refs is always present
+        if "evidence_refs" not in analysis or not isinstance(analysis.get("evidence_refs"), list):
+            analysis["evidence_refs"] = []
+
+        # Persist (store evidence_pack under extracted_json)
+        persisted_extracted_json = {
+            "doc_type": ex.doc_type,
+            "meta": ex.meta,
+            **(extracted_json or {}),
+            "evidence_pack": evidence_pack_dict,
+        }
+
         db.upsert_checkin_file_artifact(
             tenant_id=tenant_id,
             checkin_id=checkin_id,
@@ -240,19 +308,20 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
             drive_file_id=att.drive_file_id or "",
             direct_url=att.direct_url or "",
             content_hash=content_hash,
-            extracted_text=attachment_text[:120000],  # keep it bounded in DB
-            extracted_json={"doc_type": ex.doc_type, "meta": ex.meta, **(ex.extracted_json or {})},
+            extracted_text=attachment_text[:120000],  # bounded
+            extracted_json=persisted_extracted_json,
             analysis_json=analysis or {},
         )
 
-        # Build reply-context snippet
+        # Build reply-context snippet with citations (locators)
         summ = str((analysis or {}).get("summary") or "").strip()
         matches = bool((analysis or {}).get("matches_checkin") is True)
         conf = (analysis or {}).get("confidence", None)
-        mism = (analysis or {}).get("mismatches") or []
-        if not isinstance(mism, list):
-            mism = []
-        mism = [str(x).strip() for x in mism if str(x).strip()][:4]
+
+        ev = (analysis or {}).get("evidence_refs") or []
+        if not isinstance(ev, list):
+            ev = []
+        ev = [str(x).strip() for x in ev if str(x).strip()][:4]
 
         line = f"- File: {att.name} | type={ex.doc_type} | matches={matches}"
         if conf is not None:
@@ -262,23 +331,22 @@ def analyze_attachments(settings: Settings, state: Dict[str, Any]) -> Dict[str, 
                 pass
         if summ:
             line += f"\n  Summary: {summ}"
-        if mism:
-            line += "\n  Mismatches: " + "; ".join(mism)
+        if ev:
+            line += "\n  Evidence: " + "; ".join(ev)
 
         ctx_lines.append(line)
 
         analyzed.append({"ref": att.source_ref, "filename": att.name, "ok": True, "doc_type": ex.doc_type})
+        evidence_out.append({"filename": att.name, "mime_type": mime, "doc_type": ex.doc_type, "evidence_pack": evidence_pack_dict})
+
         processed += 1
 
     state["attachments_analyzed"] = analyzed
+    state["attachment_evidence"] = evidence_out
     state["attachment_context"] = "\n".join(ctx_lines).strip()
 
-    state.setdefault("logs", []).append(
-        f"analyze_attachments: processed={processed} skipped={skipped} max_files={max_files}"
-    )
+    state.setdefault("logs", []).append(f"analyze_attachments: processed={processed} skipped={skipped} max_files={max_files}")
 
-    # If this run is attachments-only backfill, we still want the pipeline to continue normally
-    # but reply/writeback already controlled by graph event_type rules.
     if attachments_only:
         state.setdefault("logs", []).append("analyze_attachments: attachments_only mode enabled")
 

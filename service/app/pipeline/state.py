@@ -28,14 +28,35 @@ class GraphState:
 
     # Prepared texts
     thread_snapshot_text: Optional[str] = None
+    retrieval_query_text: Optional[str] = None
 
-    # Retrieval results
+    # Attachments (Files column)
+    attachment_context: Optional[str] = None
+    attachments_analyzed: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Retrieval results (expanded)
     similar_incidents: List[Dict[str, Any]] = field(default_factory=list)
+    similar_problems: List[Dict[str, Any]] = field(default_factory=list)
+    similar_resolutions: List[Dict[str, Any]] = field(default_factory=list)
+    similar_media: List[Dict[str, Any]] = field(default_factory=list)
     relevant_ccp_chunks: List[Dict[str, Any]] = field(default_factory=list)
+    relevant_dashboard_updates: List[Dict[str, Any]] = field(default_factory=list)
+    relevant_glide_kb_chunks: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Packed prompt context + evidence index
+    packed_context: Optional[str] = None
+    evidence_index: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_index_text: Optional[str] = None
 
     # LLM output
     ai_reply: Optional[str] = None
+    is_critical: Optional[bool] = None
     confidence: Optional[float] = None
+    defects_by_image: List[Dict[str, Any]] = field(default_factory=list)
+
+    # NEW: reply grounding outputs
+    reply_citations: List[Dict[str, Any]] = field(default_factory=list)
+    edge_tab_refs: List[Dict[str, Any]] = field(default_factory=list)
 
     # Writeback
     writeback_done: bool = False

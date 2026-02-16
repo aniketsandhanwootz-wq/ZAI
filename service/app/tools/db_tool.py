@@ -1,10 +1,11 @@
 # service/app/tools/db_tool.py
-# Database utility tool for managing artifacts.
+# Database utility tool for managing artifacts + checkin file artifacts.
 from __future__ import annotations
 
-from typing import Any, Dict, Set
+from typing import Any, Dict, Set, Optional, List, Tuple
 import json
 import psycopg2
+import psycopg2.extras
 
 
 class DBTool:
@@ -16,6 +17,10 @@ class DBTool:
         conn.autocommit = True
         return conn
 
+    # ----------------------------
+    # Generic artifacts (idempotency)
+    # ----------------------------
+
     def existing_artifact_source_hashes(
         self,
         *,
@@ -23,10 +28,6 @@ class DBTool:
         checkin_id: str,
         artifact_type: str,
     ) -> Set[str]:
-        """
-        Returns a set of source_hash strings already stored for this tenant+checkin+type.
-        Uses meta JSON so we don't need a join.
-        """
         q = """
         SELECT COALESCE(meta->>'source_hash','') AS source_hash
         FROM artifacts
@@ -68,10 +69,6 @@ class DBTool:
         url: str,
         meta: Dict[str, Any],
     ) -> bool:
-        """
-        Same as insert_artifact but NEVER raises.
-        Returns True if insert succeeded else False.
-        """
         try:
             self.insert_artifact(run_id=run_id, artifact_type=artifact_type, url=url, meta=meta)
             return True
@@ -86,10 +83,6 @@ class DBTool:
         artifact_type: str,
         source_hash: str,
     ) -> str:
-        """
-        Returns latest url for given (type, tenant, checkin, source_hash) or "".
-        Useful to skip re-upload if we already uploaded before.
-        """
         q = """
         SELECT COALESCE(url,'') AS url
         FROM artifacts
@@ -117,10 +110,6 @@ class DBTool:
         artifact_type: str,
         source_hash: str,
     ) -> tuple[str, Dict[str, Any]]:
-        """
-        Returns (url, meta_dict) for latest matching artifact row.
-        Useful so callers can rebuild thumbnail URLs from meta->drive_file_id.
-        """
         q = """
         SELECT COALESCE(url,''), COALESCE(meta,'{}'::jsonb)
         FROM artifacts
@@ -143,17 +132,13 @@ class DBTool:
                     return url, meta
         except Exception:
             return "", {}
-        
+
     def image_captions_by_hash(
         self,
         *,
         tenant_id: str,
         checkin_id: str,
     ) -> Dict[str, str]:
-        """
-        Returns {source_hash: caption} for IMAGE_CAPTION artifacts for this tenant+checkin.
-        Used so media ingest can reuse old captions and still upsert MEDIA vectors.
-        """
         q = """
         SELECT
           COALESCE(meta->>'source_hash','') AS source_hash,
@@ -175,7 +160,6 @@ class DBTool:
                         if not hh:
                             continue
                         cc = str(c or "").strip()
-                        # Keep newest caption per hash
                         if hh not in out and cc:
                             out[hh] = cc
         except Exception:
@@ -261,10 +245,6 @@ class DBTool:
         source_hash: str,
         content_hash: str = "",
     ) -> bool:
-        """
-        Returns True if already processed.
-        If content_hash is given, require that match (stronger idempotency).
-        """
         if content_hash:
             q = """
             SELECT 1
@@ -294,9 +274,6 @@ class DBTool:
         checkin_id: str,
         max_items: int = 6,
     ) -> list[dict]:
-        """
-        Returns brief info for composing prompt context.
-        """
         q = """
         SELECT
           source_hash,
@@ -322,4 +299,71 @@ class DBTool:
                             "analysis_json": aj if isinstance(aj, dict) else {},
                         }
                     )
+        return out
+
+    def get_checkin_file_artifact(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        source_hash: str,
+    ) -> Dict[str, Any]:
+        """
+        Full row fetch for verification/debug (used during real sample runs).
+        """
+        q = """
+        SELECT
+          tenant_id, checkin_id, source_hash,
+          COALESCE(source_ref,'') AS source_ref,
+          COALESCE(filename,'') AS filename,
+          COALESCE(mime_type,'') AS mime_type,
+          COALESCE(byte_size,0) AS byte_size,
+          COALESCE(drive_file_id,'') AS drive_file_id,
+          COALESCE(direct_url,'') AS direct_url,
+          COALESCE(content_hash,'') AS content_hash,
+          COALESCE(extracted_text,'') AS extracted_text,
+          COALESCE(extracted_json,'{}'::jsonb) AS extracted_json,
+          COALESCE(analysis_json,'{}'::jsonb) AS analysis_json,
+          created_at, updated_at
+        FROM checkin_file_artifacts
+        WHERE tenant_id=%s AND checkin_id=%s AND source_hash=%s
+        LIMIT 1
+        """
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(q, (tenant_id, checkin_id, source_hash))
+                row = cur.fetchone()
+                return dict(row) if row else {}
+
+    def list_checkin_file_artifacts(
+        self,
+        *,
+        tenant_id: str,
+        checkin_id: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        List rows for a checkin to verify evidence persistence.
+        """
+        q = """
+        SELECT
+          source_hash,
+          COALESCE(filename,'') AS filename,
+          COALESCE(mime_type,'') AS mime_type,
+          COALESCE(byte_size,0) AS byte_size,
+          COALESCE(content_hash,'') AS content_hash,
+          COALESCE(direct_url,'') AS direct_url,
+          updated_at
+        FROM checkin_file_artifacts
+        WHERE tenant_id=%s AND checkin_id=%s
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """
+        out: List[Dict[str, Any]] = []
+        with self._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(q, (tenant_id, checkin_id, int(limit)))
+                rows = cur.fetchall() or []
+                for r in rows:
+                    out.append(dict(r))
         return out

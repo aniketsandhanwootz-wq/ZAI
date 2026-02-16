@@ -7,6 +7,7 @@ Given a check-in context and an attachment's extracted content, produce a struct
 3) Lists key findings relevant to quality/action
 4) Flags mismatches clearly (if any)
 5) Suggests questions to ask if important data is missing
+6) MOST IMPORTANT: Every key finding/action should cite where it came from using evidence locators.
 
 Return STRICT JSON with keys:
 {
@@ -19,6 +20,7 @@ Return STRICT JSON with keys:
   "measurements": ["..."],
   "actions": ["..."],
   "questions": ["..."],
+  "evidence_refs": ["locator1", "locator2", "..."],
   "confidence": 0.0-1.0
 }
 
@@ -27,12 +29,17 @@ Rules:
 - If something is unclear, say "unclear".
 - Keep lists short (max ~6 items each).
 - If the attachment is not related, set matches_checkin=false and explain why.
+- evidence_refs must include the best locators supporting key_findings/actions.
+- Prefer precise locators like pdf:FILE:p7 or xlsx:FILE:sheet:NAME when available.
 
 CHECKIN CONTEXT:
 {checkin_context}
 
 ATTACHMENT METADATA:
 {attachment_meta}
+
+EVIDENCE PACK (locators + snippets):
+{evidence_pack}
 
 ATTACHMENT EXTRACTED CONTENT (may be truncated):
 {attachment_text}

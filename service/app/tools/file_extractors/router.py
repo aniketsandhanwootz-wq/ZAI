@@ -8,11 +8,14 @@ import mimetypes
 from PIL import Image
 from io import BytesIO
 
+
 def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b or b"").hexdigest()
 
+
 def sha256_text(s: str) -> str:
     return hashlib.sha256((s or "").encode("utf-8")).hexdigest()
+
 
 def sniff_mime(filename: Optional[str] = None, mime_type: Optional[str] = None, data: Optional[bytes] = None) -> str:
     """
@@ -61,7 +64,14 @@ def sniff_mime(filename: Optional[str] = None, mime_type: Optional[str] = None, 
         except Exception:
             pass
 
+    # 5) xlsx fallback (sometimes comes as octet-stream but is actually xlsx)
+    if data and len(data) >= 2 and data[:2] == b"PK":
+        # XLSX is a zip; don't over-claim, but helps routing
+        if filename and filename.lower().endswith(".xlsx"):
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
     return "application/octet-stream"
+
 
 @dataclass
 class ExtractResult:
@@ -70,7 +80,11 @@ class ExtractResult:
     extracted_json: Dict[str, Any]
     meta: Dict[str, Any]
 
+
 def extract_any(*, filename: str, mime_type: str, data: bytes, vision_caption_fn=None) -> ExtractResult:
+    """
+    Router only. Do not put heavy logic here.
+    """
     mime = sniff_mime(filename=filename, mime_type=mime_type, data=data)
 
     if mime == "application/pdf":
@@ -87,11 +101,7 @@ def extract_any(*, filename: str, mime_type: str, data: bytes, vision_caption_fn
 
     if mime.endswith("spreadsheetml.sheet") or filename.lower().endswith(".xlsx"):
         from .xlsx_extractor import extract_xlsx
-        return extract_xlsx(
-            filename=filename,
-            data=data,
-            vision_caption_fn=vision_caption_fn,  # ✅ now captions embedded images too
-        )
+        return extract_xlsx(filename=filename, data=data, vision_caption_fn=vision_caption_fn)
 
     return ExtractResult(
         doc_type="unknown",

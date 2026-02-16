@@ -3,14 +3,10 @@
 # Supports:
 #   - direct URLs (http/https)
 #   - Google Drive URLs and relative paths
-#  - identifies mime types and whether the attachment is an image or PDF
-#  - fetches bytes via requests or Drive API
-#  - splits cell references with multiple attachments
-# Usage:
-#   resolver = AttachmentResolver(drive_tool)
-#   resolved = resolver.resolve(cell_value)
-#   bytes_data = resolver.fetch_bytes(resolved) if resolved else None   
-# Happy coding!
+#   - bare Drive file IDs
+#   - identifies mime types and whether the attachment is an image or PDF
+#   - fetches bytes via requests or Drive API
+#   - splits cell references with multiple attachments
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,7 +23,26 @@ _DRIVE_ID_PATTERNS = [
     re.compile(r"[?&]id=([a-zA-Z0-9_-]+)"),
 ]
 
+_DRIVE_BARE_ID_RX = re.compile(r"^[a-zA-Z0-9_-]{10,}$")
 _EMAIL_RX = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.I)
+
+
+def _looks_like_url(s: str) -> bool:
+    return bool(re.match(r"^https?://", (s or "").strip(), re.I))
+
+
+def _is_bare_drive_id(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return False
+    if _EMAIL_RX.match(t):
+        return False
+    if t.startswith("<<") and t.endswith(">>"):
+        return False
+    if "<" in t or ">" in t:
+        return False
+    return bool(_DRIVE_BARE_ID_RX.match(t))
+
 
 def _is_garbage_ref(s: str) -> bool:
     t = (s or "").strip()
@@ -40,17 +55,15 @@ def _is_garbage_ref(s: str) -> bool:
     if low.startswith("unable to load image data"):
         return True
 
-    # plain emails should never be treated as Drive paths
+    # plain emails should never be treated as attachments
     if _EMAIL_RX.match(t):
         return True
 
     # lines that are not url and not a path but contain #filename=
-    if "#filename=" in low and not _looks_like_url(t) and "/" not in t:
+    if "#filename=" in low and not _looks_like_url(t) and "/" not in t and not _is_bare_drive_id(t):
         return True
 
     return False
-def _looks_like_url(s: str) -> bool:
-    return bool(re.match(r"^https?://", (s or "").strip(), re.I))
 
 
 def _extract_drive_id(url: str) -> Optional[str]:
@@ -86,7 +99,8 @@ class AttachmentResolver:
     """
     Resolves:
       - direct URLs (http/https) -> download via requests
-      - Drive URLs -> extract file id -> download via Drive API (if SA has access)
+      - Drive URLs -> extract file id -> download via Drive API
+      - bare Drive file IDs -> download via Drive API
       - Drive relative paths under configured roots -> resolve via DriveTool
     """
 
@@ -98,12 +112,23 @@ class AttachmentResolver:
         if not raw or _is_garbage_ref(raw):
             return None
 
+        # Case 0: bare drive file id
+        if _is_bare_drive_id(raw) and not _looks_like_url(raw) and "/" not in raw:
+            return ResolvedAttachment(
+                source_ref=raw,
+                kind="drive_id",
+                name=raw,
+                mime_type="",
+                is_pdf=False,
+                is_image=False,
+                drive_file_id=raw,
+            )
+
         # Case 1: URL
         if _looks_like_url(raw):
             did = _extract_drive_id(raw)
             if did:
-                # ✅ Important: drive share links don't carry extensions/mime.
-                # We keep mime/is_image/is_pdf unknown here; analyze_media will byte-sniff after download.
+                # drive share links don't carry extension/mime reliably
                 return ResolvedAttachment(
                     source_ref=raw,
                     kind="drive_id",
@@ -142,7 +167,6 @@ class AttachmentResolver:
                 root_override = fid
                 rel = rest
             else:
-                # prefix present in path but not configured => mark unknown (caller decides)
                 name = raw.split("/")[-1] if "/" in raw else raw
                 mt = _guess_mime_from_name(name)
                 low = name.lower()
@@ -220,18 +244,24 @@ class AttachmentResolver:
 
         # 2) Drive bytes
         if att.drive_file_id:
-            # (optional) implement size check via Drive metadata later
             return self.drive.download_file_bytes(att.drive_file_id)
 
         return None
+
 
 def split_cell_refs(cell: str) -> list[str]:
     """
     Sheet cells can contain:
       - comma separated
       - newline separated
+      - semicolon separated
       - mixed
+
     We filter garbage lines (emails / "Unable to load image data..." etc.)
+    We accept:
+      - URLs
+      - drive-ish relative paths (contains '/')
+      - bare drive file ids
     """
     s = (cell or "").strip()
     if not s:
@@ -239,6 +269,7 @@ def split_cell_refs(cell: str) -> list[str]:
 
     s = s.replace("\r", "\n")
     s = s.replace("\n", ",")
+    s = s.replace(";", ",")
 
     parts = [p.strip() for p in s.split(",")]
     out: list[str] = []
@@ -249,8 +280,7 @@ def split_cell_refs(cell: str) -> list[str]:
         if _is_garbage_ref(p):
             continue
 
-        # accept only URLs or drive-ish relative paths (must contain '/')
-        if _looks_like_url(p) or ("/" in p):
+        if _looks_like_url(p) or ("/" in p) or _is_bare_drive_id(p):
             out.append(p)
 
     return out

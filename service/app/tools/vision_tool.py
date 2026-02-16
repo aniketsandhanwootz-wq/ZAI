@@ -1,27 +1,23 @@
-# service/app/tools/vision_tool.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List, Union
+from typing import Any, Dict, Optional, Union
 import base64
 import json
 import os
+from pathlib import Path
 import requests
 
-from ..config import Settings  # ✅ allow init from Settings
+from ..config import Settings  # allow init from Settings
 from .langsmith_trace import traceable_wrap
 
+
 def _extract_json(text: str) -> Dict[str, Any]:
-    """
-    Best-effort: find first {...} block and parse JSON.
-    """
     s = (text or "").strip()
     if not s:
         return {}
 
-    # common: model wraps JSON in ```json ... ```
     if s.startswith("```"):
-        s = s.strip()
-        s = s.strip("`").strip()
+        s = s.strip().strip("`").strip()
         if s.lower().startswith("json"):
             s = s[4:].strip()
 
@@ -47,26 +43,33 @@ def _b64_image(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("utf-8")
 
 
-def _clamp01(x: float) -> float:
-    try:
-        x = float(x)
-    except Exception:
-        x = 0.0
-    if x < 0.0:
-        return 0.0
-    if x > 1.0:
-        return 1.0
-    return x
+def _repo_root() -> Path:
+    # service/app/tools -> parents[3] = repo root
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_prompt_template(name: str) -> str:
+    """
+    Loads prompt from packages/prompts.
+    No prompt text is embedded in code by design.
+    """
+    p = _repo_root() / "packages" / "prompts" / name
+    return p.read_text(encoding="utf-8")
+
+
+def _render_template_safe(template: str, vars: Dict[str, str]) -> str:
+    out = template
+    for k, v in (vars or {}).items():
+        out = out.replace("{" + k + "}", v or "")
+    return out
 
 
 class VisionTool:
     """
     Gemini-based image caption tool (retrieval captions only).
+    Caption is used for vector DB; prompt lives in packages/prompts.
 
-    NOTE:
-      - Defect detection + bounding boxes MUST be produced by the main multimodal LLM prompt:
-        packages/prompts/checkin_reply.md via generate_ai_reply.py
-      - This tool intentionally does NOT run defect detection.
+    Defect detection + bboxes are produced only by checkin_reply.md pipeline.
     """
 
     def __init__(
@@ -76,6 +79,7 @@ class VisionTool:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         base_url: Optional[str] = None,
+        prompt_file: Optional[str] = None,
     ):
         # --- Init from Settings ---
         if isinstance(settings_or_api_key, Settings):
@@ -85,9 +89,10 @@ class VisionTool:
             self.base = (
                 (base_url or os.getenv("VISION_BASE_URL") or os.getenv("LLM_BASE_URL") or "https://generativelanguage.googleapis.com")
             ).rstrip("/")
+            self.prompt_file = (prompt_file or os.getenv("VISION_CAPTION_PROMPT_FILE") or "vision_caption_6line.md").strip()
             return
 
-        # --- Init from explicit args (backward-compatible with your current file) ---
+        # --- Init from explicit args (backward-compatible) ---
         if isinstance(settings_or_api_key, str) and settings_or_api_key.strip() and not api_key:
             api_key = settings_or_api_key.strip()
 
@@ -99,18 +104,15 @@ class VisionTool:
             or os.getenv("LLM_BASE_URL")
             or "https://generativelanguage.googleapis.com"
         ).rstrip("/")
+        self.prompt_file = (prompt_file or os.getenv("VISION_CAPTION_PROMPT_FILE") or "vision_caption_6line.md").strip()
 
     def _url(self, model: Optional[str] = None) -> str:
         m = (model or self.model or "gemini-2.0-flash").strip()
         return f"{self.base}/v1beta/models/{m}:generateContent?key={self.api_key}"
 
-    # ✅ Compatibility alias: CCP ingest expects this name/signature
+    # Compatibility alias: CCP ingest expects this name/signature
     def caption_image(self, *, image_bytes: bytes, mime_type: str, context: str = "") -> str:
-        return self.caption_for_retrieval(
-            image_bytes=image_bytes,
-            mime_type=mime_type,
-            context_hint=context,
-        )
+        return self.caption_for_retrieval(image_bytes=image_bytes, mime_type=mime_type, context_hint=context)
 
     def caption_for_retrieval(
         self,
@@ -121,30 +123,20 @@ class VisionTool:
         model: Optional[str] = None,
     ) -> str:
         """
-        Returns EXACTLY 6 lines (plain text), stable for embedding.
+        Returns text caption (expected to be 6-line format).
+        Prompt comes ONLY from packages/prompts/<prompt_file>.
+        No in-code fallback prompt.
         """
+        # If API key missing, fail safe without prompting.
+        # (Callers should handle empty caption.)
+        if not (self.api_key or "").strip():
+            return ""
+
+        prompt_t = _load_prompt_template(self.prompt_file)
+        prompt = _render_template_safe(prompt_t, {"context_hint": (context_hint or "").strip()})
+
         url = self._url(model or os.getenv("VISION_CAPTION_MODEL") or self.model)
         mime = (mime_type or "image/jpeg").strip()
-
-        prompt = (
-            "ROLE: Manufacturing quality assistant.\n"
-            "TASK: Create a RETRIEVAL CAPTION for this image.\n\n"
-            "OUTPUT FORMAT (strict):\n"
-            "Return EXACTLY 6 lines, each starting with the label:\n"
-            "PART:\n"
-            "PROCESS:\n"
-            "DEFECT:\n"
-            "LOCATION:\n"
-            "MEASUREMENT:\n"
-            "EVIDENCE:\n\n"
-            "RULES:\n"
-            "- Be factual. Do NOT guess or invent.\n"
-            "- If unknown/unclear, write 'unclear'.\n"
-            "- Keep each line <= 18 words.\n"
-            "- Use manufacturing vocabulary when applicable.\n"
-        )
-        if (context_hint or "").strip():
-            prompt += "\nCONTEXT (use only if relevant; do not copy blindly):\n" + context_hint.strip() + "\n"
 
         payload = {
             "contents": [
@@ -183,12 +175,6 @@ class VisionTool:
         context_hint: str = "",
         model: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Disabled by design.
-
-        Defect detection + bounding boxes are generated ONLY in the main prompt:
-        packages/prompts/checkin_reply.md (via LLMTool.generate_json_with_images()).
-        """
         raise RuntimeError(
             "VisionTool.detect_defects() is disabled. "
             "Use checkin_reply.md (multimodal) to generate defects_by_image."
