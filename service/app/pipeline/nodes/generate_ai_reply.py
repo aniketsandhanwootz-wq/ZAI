@@ -170,10 +170,10 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         state["reply_citations"] = []
         state["edge_tab_refs"] = []
         return state
-
+    
     technical = (out.get("technical_advice") or "").strip()
     if not technical:
-        technical = llm.generate_text(prompt).strip()
+        technical = _strip_evidence_blocks(llm.generate_text(prompt).strip())
 
     # Optional fields (won't break existing flows)
     citations: List[Dict[str, Any]] = []
@@ -188,5 +188,5 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
     state["citations"] = citations
     state["edge_tab_refs"] = edge_refs
 
-    state.setdefault("logs", []).append("Generated AI reply + defects + citations (evidence-index grounded)")
+    state.setdefault("logs", []).append("Generated AI reply + defects (evidence-pack grounded; no citations returned)")
     return state
