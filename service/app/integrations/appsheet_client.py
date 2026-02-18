@@ -21,7 +21,7 @@ class AppSheetCuesConfig:
     col_cue_id: str
     col_id: str
     col_generated_at: str
-
+    col_context: str
 
 class AppSheetClient:
     """
@@ -70,6 +70,7 @@ class AppSheetClient:
             col_cue_id=(s.appsheet_cues_col_cue_id or "Cue ID").strip(),
             col_id=(s.appsheet_cues_col_id or "ID").strip(),
             col_generated_at=(s.appsheet_cues_col_generated_at or "Date").strip(),
+            col_context=(getattr(s, "appsheet_cues_col_context", "") or "Context").strip(),
         )
 
     def _base_cfg(self) -> tuple[str, str, str]:
@@ -273,7 +274,7 @@ class AppSheetClient:
         self,
         *,
         legacy_id: str,
-        cue_items: List[Dict[str, str]],
+        cue_items: List[Dict[str, Any]],
         generated_at: str,
         timeout: int = 30,
     ) -> Any:
@@ -289,16 +290,19 @@ class AppSheetClient:
         for it in cue_items or []:
             cue_id = (it.get("cue_id") or "").strip()
             cue = (it.get("cue") or "").strip()
+            context = (it.get("context") or "").strip()
             if not cue_id or not cue:
                 continue
-            rows.append(
-                {
-                    cfg.col_cue: cue,
-                    cfg.col_cue_id: cue_id,
-                    cfg.col_id: (legacy_id or "").strip(),
-                    cfg.col_generated_at: (generated_at or "").strip(),
-                }
-            )
+            row = {
+                cfg.col_cue: cue,
+                cfg.col_cue_id: cue_id,
+                cfg.col_id: (legacy_id or "").strip(),
+                cfg.col_generated_at: (generated_at or "").strip(),
+            }
+            # only include column if non-empty (keeps table clean)
+            if context:
+                row[cfg.col_context] = context
+            rows.append(row)
 
         if not rows:
             return None
@@ -309,7 +313,7 @@ class AppSheetClient:
         self,
         *,
         legacy_id: str,
-        cue_items: List[Dict[str, str]],
+        cue_items: List[Dict[str, Any]],
         generated_at: str,
         timeout: int = 30,
     ) -> Any:
@@ -328,16 +332,19 @@ class AppSheetClient:
         for it in cue_items or []:
             cue_id = (it.get("cue_id") or "").strip()
             cue = (it.get("cue") or "").strip()
+            context = (it.get("context") or "").strip()
             if not cue_id or not cue:
                 continue
-            rows.append(
-                {
-                    cfg.col_cue: cue,
-                    cfg.col_cue_id: cue_id,
-                    cfg.col_id: (legacy_id or "").strip(),
-                    cfg.col_generated_at: (generated_at or "").strip(),
-                }
-            )
+            row = {
+                cfg.col_cue: cue,
+                cfg.col_cue_id: cue_id,
+                cfg.col_id: (legacy_id or "").strip(),
+                cfg.col_generated_at: (generated_at or "").strip(),
+            }
+            # only include column if non-empty (keeps table clean)
+            if context:
+                row[cfg.col_context] = context
+            rows.append(row)
 
         if not rows:
             return None

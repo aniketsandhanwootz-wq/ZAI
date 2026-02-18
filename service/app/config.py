@@ -253,6 +253,7 @@ class Settings:
     appsheet_cues_col_cue_id: str
     appsheet_cues_col_id: str
     appsheet_cues_col_generated_at: str
+    appsheet_cues_col_context: str
 
     # Power Automate (Teams routing flow webhook)
     power_automate_webhook_url: str
@@ -373,6 +374,7 @@ def load_settings() -> Settings:
         "APPSHEET_CUES_COL_GENERATED_AT",
         _get_env("APPSHEET_CUES_COL_DATE", "Date"),
     )
+    appsheet_cues_col_context = _get_env("APPSHEET_CUES_COL_CONTEXT", "Context")
 
     # AppSheet (Conversation critical trigger)
     appsheet_conversation_table = _get_env("APPSHEET_CONVERSATION_TABLE", "Conversation")
@@ -475,6 +477,7 @@ def load_settings() -> Settings:
         appsheet_cues_col_cue_id=appsheet_cues_col_cue_id,
         appsheet_cues_col_id=appsheet_cues_col_id,
         appsheet_cues_col_generated_at=appsheet_cues_col_generated_at,
+        appsheet_cues_col_context=appsheet_cues_col_context,
         appsheet_conversation_table=appsheet_conversation_table,
         appsheet_conversation_key_col=appsheet_conversation_key_col,
         appsheet_conversation_critical_col=appsheet_conversation_critical_col,

@@ -43,7 +43,8 @@ def _load_prompt_file(name: str) -> str:
 def _load_zai_cues_prompt() -> str:
     return _load_prompt_file("zai_cues_10.md")
 
-
+def _load_zai_context_prompt() -> str:
+    return _load_prompt_file("zai_context.md")
 # -------------------------
 # Helpers
 # -------------------------
@@ -197,6 +198,89 @@ def _parse_json_loose(s: str) -> dict:
     except Exception:
         return {}
 
+def _generate_context_notes_for_cues(
+    *,
+    llm: LLMTool,
+    cues10: List[str],
+    stage: str,
+    packed_context: str,
+    process_material: str,
+    recent_activity: str,
+    previous_chips: str,
+) -> Dict[int, str]:
+    """
+    Uses packages/prompts/zai_context.md
+    Returns {index: "TYPE: header\\nexplanation"} for only the ~30% selected.
+    """
+    if not cues10:
+        return {}
+
+    tmpl = _load_zai_context_prompt()
+
+    cues_list = "\n".join([f"{i}|{(cues10[i] or '').strip()}" for i in range(len(cues10))]).strip()
+
+    # Map prompt placeholders to what we actually have today.
+    prompt = (
+        tmpl.replace("{stage}", stage or "N/A")
+        .replace("{vector_risks}", packed_context or "N/A")           # best available proxy
+        .replace("{process_material}", process_material or "N/A")
+        .replace("{recent_activity}", recent_activity or "N/A")
+        .replace("{previous_chips}", previous_chips or "N/A")
+    )
+
+    # Inject cues list (zai_context.md expects CUES_LIST conceptually; we hard-add it)
+    prompt = (
+        prompt
+        + "\n\nCUES_LIST:\n"
+        + cues_list
+        + "\n\n(Important: Output only selected blocks in the specified format.)\n"
+    )
+
+    raw = llm.generate_text(prompt)
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+
+    out: Dict[int, str] = {}
+
+    # Parse blocks like: `index|TYPE: Header\nExplanation`
+    # We accept multiple blocks separated by blank lines.
+    blocks = re.split(r"\n\s*\n+", text)
+    for b in blocks:
+        b = (b or "").strip()
+        if not b:
+            continue
+        lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+        if not lines:
+            continue
+
+        first = lines[0]
+        # Expect: "<idx>|<TYPE>: <Header>"
+        m = re.match(r"^\s*(\d+)\s*\|\s*([a-zA-Z_]+)\s*:\s*(.+)\s*$", first)
+        if not m:
+            continue
+
+        idx = int(m.group(1))
+        typ = m.group(2).strip()
+        header = m.group(3).strip()
+
+        if idx < 0 or idx >= len(cues10):
+            continue
+
+        # Remaining lines are explanation (max ~90 chars per your prompt; we keep as-is but clamp total)
+        expl = " ".join(lines[1:]).strip()
+        note_lines: List[str] = []
+        note_lines.append(f"{typ}: {header}".strip())
+        if expl:
+            note_lines.append(expl)
+
+        note = "\n".join(note_lines).strip()
+        if len(note) > 240:
+            note = note[:237] + "..."
+
+        out[idx] = note
+
+    return out
 
 def _split_lines_fallback(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
@@ -576,7 +660,17 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
         closure_notes="",
         attachment_context="",
     )
-
+    # Context notes (only for ~30% cues that are non-obvious / risky)
+    context_map = _generate_context_notes_for_cues(
+        llm=llm,
+        cues10=cues10,
+        stage=stage,
+        packed_context=packed_context,
+        process_material=process_material,
+        recent_activity=recent_activity,
+        previous_chips=previous_chips,
+    )
+    state["assembly_todo_context_map"] = context_map
     chips = _project_chips_from_10(cues10)
 
     col_out = sheets.map.col("project", "ai_critcal_point")
@@ -611,10 +705,16 @@ def generate_assembly_todo(settings: Settings, state: Dict[str, Any]) -> Dict[st
         client = AppSheetClient(settings)
         if client.enabled() and cues10:
             generated_at = _now_timestamp_str()
-            cue_items = [
-                {"cue_id": _slot_cue_id(tenant_id=tenant_id, legacy_id=legacy_id, slot=i), "cue": cues10[i - 1]}
-                for i in range(1, 11)
-            ]
+            cue_items = []
+            for i in range(1, 11):
+                idx = i - 1
+                cue_items.append(
+                    {
+                        "cue_id": _slot_cue_id(tenant_id=tenant_id, legacy_id=legacy_id, slot=i),
+                        "cue": cues10[idx],
+                        "context": (context_map.get(idx) or "").strip(),
+                    }
+                )
             client.upsert_cues_rows(
                 legacy_id=legacy_id,
                 cue_items=cue_items,
