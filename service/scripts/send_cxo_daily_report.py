@@ -267,7 +267,12 @@ def main() -> None:
 
     days = int(getattr(s, "cxo_report_days", 3) or 3)
     start_ts, now_ts = tool.last_n_days_window_ist(days=days)
-    logger.info("IST window: days=%d start=%s now=%s", days, start_ts.isoformat(), now_ts.isoformat())
+    logger.info(
+        "IST window: days=%d start=%s now=%s | windowing_by=created_at (stable; ignores ingestion updated_at bumps)",
+        days,
+        start_ts.isoformat(),
+        now_ts.isoformat(),
+    )
 
     # stable sort
     assemblies_sorted = sorted(
@@ -298,10 +303,15 @@ def main() -> None:
     logger.info("Global events: checkins=%d updates=%d", len(checkins_json), len(updates_json))
 
     # -------- GLOBAL low visibility (computed BEFORE batching) --------
+    mode = (os.getenv("CXO_LOW_VISIBILITY_MODE", "window") or "window").strip().lower()
+    if mode not in ("window", "today"):
+        mode = "window"
+
     low = tool.compute_low_visibility(
         assemblies=all_assemblies,
         checkins=checkins_json,
         updates=updates_json,
+        mode="today" if mode == "today" else "window",
     )
     low_ul = tool.low_visibility_html(low)
 
@@ -319,26 +329,62 @@ def main() -> None:
     quality_li_batches: list[list[str]] = []
     notes: list[str] = []
 
-    # Index global events by part_number for batch filtering
-    by_pn_checkins: Dict[str, List[Dict[str, str]]] = {}
-    by_pn_updates: Dict[str, List[Dict[str, str]]] = {}
+    # Index global events by part_number AND part_name (prompt rule: match by pn primary and/or name)
+    by_key_checkins: Dict[str, List[Dict[str, str]]] = {}
+    by_key_updates: Dict[str, List[Dict[str, str]]] = {}
+
+    def _k_pn(x: str) -> str:
+        return "pn:" + (x or "").strip().casefold()
+
+    def _k_nm(x: str) -> str:
+        return "nm:" + (x or "").strip().casefold()
+
     for c in checkins_json:
         pn = (c.get("part_number") or "").strip()
+        nm = (c.get("part_name") or "").strip()
         if pn:
-            by_pn_checkins.setdefault(pn, []).append(c)
+            by_key_checkins.setdefault(_k_pn(pn), []).append(c)
+        if nm:
+            by_key_checkins.setdefault(_k_nm(nm), []).append(c)
+
     for u in updates_json:
         pn = (u.get("part_number") or "").strip()
+        nm = (u.get("part_name") or "").strip()
         if pn:
-            by_pn_updates.setdefault(pn, []).append(u)
+            by_key_updates.setdefault(_k_pn(pn), []).append(u)
+        if nm:
+            by_key_updates.setdefault(_k_nm(nm), []).append(u)
 
     for bidx, batch in enumerate(batches, start=1):
         t1 = time.time()
-        pns = [a.part_number for a in batch if (a.part_number or "").strip()]
+        keys = []
+        for a in batch:
+            pn = (a.part_number or "").strip()
+            nm = (a.part_name or "").strip()
+            if pn:
+                keys.append("pn:" + pn.casefold())
+            if nm:
+                keys.append("nm:" + nm.casefold())
+
+        seen = set()
         batch_checkins: List[Dict[str, str]] = []
         batch_updates: List[Dict[str, str]] = []
-        for pn in pns:
-            batch_checkins.extend(by_pn_checkins.get(pn, []))
-            batch_updates.extend(by_pn_updates.get(pn, []))
+
+        for k in keys:
+            for c in by_key_checkins.get(k, []):
+                cid = (c.get("checkin_id") or "") + "|" + (c.get("vector_type") or "") + "|" + (c.get("part_number") or "") + "|" + (c.get("description") or "")
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                batch_checkins.append(c)
+
+        for k in keys:
+            for u in by_key_updates.get(k, []):
+                uid = (u.get("part_number") or "") + "|" + (u.get("description") or "")
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                batch_updates.append(u)
 
         batch_assemblies_json = tool.assemblies_to_prompt_json(batch)
 
@@ -378,7 +424,8 @@ def main() -> None:
 
     header_html = (
         f"<p><b>Scope:</b> Manufacturing assemblies={len(all_assemblies)} | "
-        f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')}</p>"
+        f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')} | "
+        f"Time filter: created_at (not updated_at)</p>"
     )
 
     final_html = _build_final_html(
