@@ -27,7 +27,8 @@ def run_migrations(settings: Settings) -> None:
         "006_artifacts_lookup_indexes.sql",
         "007_company_profiles.sql",
         "008_glide_kb.sql",
-        "009_checkin_file_artifacts.sql",      
+        "009_checkin_file_artifacts.sql", 
+        "010_cxo_report_indexes.sql",    
     ]
     logger.info("running migrations from %s", mig_dir)
 

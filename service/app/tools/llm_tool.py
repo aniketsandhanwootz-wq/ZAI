@@ -197,6 +197,8 @@ class LLMTool:
                 parts = candidates[0].get("content", {}).get("parts", []) or []
                 return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
 
+            traced = traceable_wrap(_call, name="llm.gemini.generate_text", run_type="llm")
+            return traced()
         raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
 
     def generate_json_with_images(
