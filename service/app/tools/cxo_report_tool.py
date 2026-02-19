@@ -23,12 +23,22 @@ def _parse_dispatch_ddmm(s: str) -> str:
     t = (s or "").strip()
     if not t:
         return ""
+
+    # Common sheet formats
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(t, fmt)
             return dt.strftime("%d/%m")
         except Exception:
             pass
+
+    # ISO strings like 2026-02-20T00:00:00.000Z
+    try:
+        dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+        return dt.strftime("%d/%m")
+    except Exception:
+        pass
+
     return t
 
 

@@ -136,12 +136,18 @@ def _sanitize_html_against_foreign_parts(*, html: str, allowed_part_numbers: Lis
     out = _rewrite_section("Quality Issues Reported", out)
     return out
 
-
 def _json_bytes_estimate(obj: object) -> int:
-    # Small/fast estimate to guide batching
+    # Small/fast estimate to guide batching (must handle datetime)
     try:
         import json
-        return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+        from datetime import date, datetime
+
+        def _default(o: object) -> str:
+            if isinstance(o, (datetime, date)):
+                return o.isoformat()
+            return str(o)
+
+        return len(json.dumps(obj, ensure_ascii=False, default=_default).encode("utf-8"))
     except Exception:
         return 0
 

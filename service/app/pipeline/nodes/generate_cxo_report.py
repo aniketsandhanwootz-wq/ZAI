@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List
+from datetime import date, datetime
 
 from ...config import Settings
 from ...tools.llm_tool import LLMTool
@@ -26,6 +27,17 @@ def _load_prompt_template() -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _json_default(o: Any) -> str:
+    # Make DB datetimes safe for json.dumps
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
+
+
+def _json_dumps_safe(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=_json_default)
+
+
 def generate_cxo_report_html(
     *,
     settings: Settings,
@@ -36,9 +48,9 @@ def generate_cxo_report_html(
     tpl = _load_prompt_template()
 
     prompt = (
-        tpl.replace("{{ALL_ASSEMBLIES_JSON}}", json.dumps(all_assemblies, ensure_ascii=False))
-        .replace("{{CHECKINS_JSON}}", json.dumps(checkins, ensure_ascii=False))
-        .replace("{{PROJECT_UPDATES_JSON}}", json.dumps(project_updates, ensure_ascii=False))
+        tpl.replace("{{ALL_ASSEMBLIES_JSON}}", _json_dumps_safe(all_assemblies))
+        .replace("{{CHECKINS_JSON}}", _json_dumps_safe(checkins))
+        .replace("{{PROJECT_UPDATES_JSON}}", _json_dumps_safe(project_updates))
     )
 
     llm = LLMTool(settings)
