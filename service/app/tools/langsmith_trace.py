@@ -45,24 +45,32 @@ def _safe_len(x: Any) -> int:
     except Exception:
         return 0
 
-def traceable_wrap(fn: Callable[..., T], *, name: str, run_type: str) -> Callable[..., T]:
+def traceable_wrap(
+    fn: Callable[..., T],
+    *,
+    name: str,
+    run_type: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Callable[..., T]:
     """
     Wrap any function into a LangSmith span, if tracing is enabled.
     If tracing is disabled OR langsmith isn't installed, returns original fn.
+
+    NEW:
+      - metadata: attached via tracing_context (project/tags respected)
     """
     if not enabled():
         return fn
 
     try:
-        # Preferred minimal API: decorator
         from langsmith import traceable  # type: ignore
     except Exception:
         return fn
 
     def _wrapped(*args: Any, **kwargs: Any) -> T:
-        return fn(*args, **kwargs)
+        with tracing_context(metadata=metadata):
+            return fn(*args, **kwargs)
 
-    # Give it a readable name in the UI
     try:
         _wrapped.__name__ = name.replace("/", "_").replace(" ", "_").replace(":", "_")
     except Exception:
@@ -102,10 +110,21 @@ def tracing_context(metadata: Optional[Dict[str, Any]] = None) -> Iterator[None]
         yield
 
 def mk_http_meta(*, url: str, payload: Any = None, timeout_s: float | int | None = None) -> Dict[str, Any]:
-    # Keep it small + safe (don’t log images / huge prompts)
+    payload_bytes: int | None = None
+    payload_type = type(payload).__name__
+
+    try:
+        if isinstance(payload, (bytes, bytearray)):
+            payload_bytes = len(payload)
+        elif isinstance(payload, (dict, list)):
+            import json as _json
+            payload_bytes = len(_json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        payload_bytes = None
+
     return {
         "url": str(url),
         "timeout_s": float(timeout_s) if timeout_s is not None else None,
-        "payload_bytes": _safe_len(payload) if isinstance(payload, (bytes, bytearray)) else None,
-        "payload_type": type(payload).__name__,
+        "payload_bytes": payload_bytes,
+        "payload_type": payload_type,
     }

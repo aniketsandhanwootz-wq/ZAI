@@ -388,15 +388,15 @@ class VectorTool:
         h = content_hash or _sha256_text(
             f"{tenant_id}|{legacy_id or ''}|{project_name or ''}|{part_number or ''}|{update_message}"
         )
-
         sql = """
         INSERT INTO dashboard_vectors (
           tenant_id, project_name, part_number, legacy_id,
-          update_message, embedding, content_hash
+          update_message, embedding, content_hash, updated_at
         )
-        VALUES (%s,%s,%s,%s,%s,%s::vector,%s)
+        VALUES (%s,%s,%s,%s,%s,%s::vector,%s, now())
         ON CONFLICT (tenant_id, content_hash)
-        DO NOTHING
+        DO UPDATE SET
+          updated_at = now()
         """
         with self._conn() as conn, conn.cursor() as cur:
             cur.execute(
