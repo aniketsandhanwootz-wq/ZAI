@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from app.config import load_settings
 from app.tools.sheets_tool import SheetsTool
@@ -24,11 +25,6 @@ def _setup_logging() -> None:
 
 def _strip_html_ws(s: str) -> str:
     return (s or "").strip()
-
-
-def _wrap_company_section(*, company_row_id: str, company_html: str) -> str:
-    hdr = f"<h2>Company Row ID: {company_row_id}</h2>"
-    return hdr + (company_html or "")
 
 
 def _extract_section_ul_items(html: str, heading_text: str) -> List[str]:
@@ -60,16 +56,30 @@ def _merge_li_items(*, sections: list[list[str]]) -> list[str]:
     return out
 
 
-def _build_final_html(*, major_lis: list[str], quality_lis: list[str], low_visibility_html_ul: str) -> str:
+def _build_final_html(
+    *,
+    header_html: str,
+    major_lis: list[str],
+    quality_lis: list[str],
+    low_visibility_html_ul: str,
+    batch_note_lis: list[str],
+) -> str:
     major_ul = "<ul><li>No major movements captured.</li></ul>" if not major_lis else "<ul>" + "".join(major_lis) + "</ul>"
     quality_ul = "<ul><li>No quality issues captured.</li></ul>" if not quality_lis else "<ul>" + "".join(quality_lis) + "</ul>"
+
+    notes_ul = ""
+    if batch_note_lis:
+        notes_ul = "<h3>Report Notes</h3><ul>" + "".join(batch_note_lis) + "</ul>"
+
     return (
-        "<h3>Major Movements</h3>"
+        (header_html or "")
+        + "<h3>Major Movements</h3>"
         + major_ul
         + "<h3>Quality Issues Reported</h3>"
         + quality_ul
         + "<h3>Low visibility Assemblies</h3>"
         + (low_visibility_html_ul or "<ul><li>No low visibility assemblies today.</li></ul>")
+        + notes_ul
     )
 
 
@@ -95,7 +105,6 @@ def _sanitize_html_against_foreign_parts(*, html: str, allowed_part_numbers: Lis
             if pn and pn in s:
                 return True
 
-        # part-number-like tokens heuristic
         toks = re.findall(r"\b[a-zA-Z0-9\-_/]{4,40}\b", s)
         for tok in toks:
             t = tok.strip()
@@ -128,13 +137,95 @@ def _sanitize_html_against_foreign_parts(*, html: str, allowed_part_numbers: Lis
     return out
 
 
-def _chunked(items: List[Assembly], size: int) -> List[List[Assembly]]:
-    if size <= 0:
-        size = 20
-    out: List[List[Assembly]] = []
-    for i in range(0, len(items), size):
-        out.append(items[i : i + size])
-    return out
+def _json_bytes_estimate(obj: object) -> int:
+    # Small/fast estimate to guide batching
+    try:
+        import json
+        return len(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _adaptive_batches(
+    *,
+    assemblies_sorted: List[Assembly],
+    global_checkins: List[Dict[str, str]],
+    global_updates: List[Dict[str, str]],
+    max_payload_bytes: int,
+    hard_max_batch: int,
+) -> List[List[Assembly]]:
+    """
+    Adaptive batching heuristic:
+    - Keep batches small enough that (assemblies + global checkins/updates filtered to those assemblies) stays under max_payload_bytes.
+    - This reduces chance of Gemini context blowup and reduces retries/503 load.
+    """
+    if max_payload_bytes <= 0:
+        max_payload_bytes = 75000
+    if hard_max_batch <= 0:
+        hard_max_batch = 20
+
+    # Index global events by part_number for fast filtering
+    by_pn_checkins: Dict[str, List[Dict[str, str]]] = {}
+    by_pn_updates: Dict[str, List[Dict[str, str]]] = {}
+    for c in global_checkins or []:
+        pn = str(c.get("part_number") or "").strip()
+        if pn:
+            by_pn_checkins.setdefault(pn, []).append(c)
+    for u in global_updates or []:
+        pn = str(u.get("part_number") or "").strip()
+        if pn:
+            by_pn_updates.setdefault(pn, []).append(u)
+
+    batches: List[List[Assembly]] = []
+    cur: List[Assembly] = []
+
+    def batch_payload_bytes(test_batch: List[Assembly]) -> int:
+        pns = [a.part_number for a in test_batch if (a.part_number or "").strip()]
+        chk: List[Dict[str, str]] = []
+        upd: List[Dict[str, str]] = []
+        for pn in pns:
+            chk.extend(by_pn_checkins.get(pn, []))
+            upd.extend(by_pn_updates.get(pn, []))
+
+        # estimate only the JSON bits (prompt adds some fixed overhead)
+        return (
+            _json_bytes_estimate([{
+                "legacy_id": a.legacy_id,
+                "project_name": a.project_name,
+                "part_name": a.part_name,
+                "part_number": a.part_number,
+                "dispatch_date": a.dispatch_date,
+                "vendor_poc": a.vendor_poc,
+                "internal_poc": a.internal_poc,
+            } for a in test_batch])
+            + _json_bytes_estimate(chk)
+            + _json_bytes_estimate(upd)
+            + 4000
+        )
+
+    for a in assemblies_sorted:
+        if not cur:
+            cur = [a]
+            continue
+
+        test = cur + [a]
+        if len(test) > hard_max_batch:
+            batches.append(cur)
+            cur = [a]
+            continue
+
+        if batch_payload_bytes(test) <= max_payload_bytes:
+            cur = test
+            continue
+
+        # too big -> finalize current, start new
+        batches.append(cur)
+        cur = [a]
+
+    if cur:
+        batches.append(cur)
+
+    return batches
 
 
 def main() -> None:
@@ -158,6 +249,11 @@ def main() -> None:
     smtp_password = (getattr(s, "smtp_password", "") or "").strip()
     smtp_use_starttls = bool(getattr(s, "smtp_use_starttls", True))
 
+    # Controls (env overrides allowed)
+    max_payload_bytes = int(os.getenv("CXO_REPORT_MAX_PAYLOAD_BYTES", str(getattr(s, "cxo_report_max_payload_bytes", 75000) or 75000)))
+    hard_max_batch = int(os.getenv("CXO_REPORT_HARD_MAX_BATCH", "20") or "20")
+    fail_open = (os.getenv("CXO_REPORT_FAIL_OPEN", str(int(bool(getattr(s, "cxo_report_fail_open", True))))) or "1").strip().lower() in ("1", "true", "yes", "y")
+
     sheets = SheetsTool(s)
     tool = CXOReportTool(s)
 
@@ -169,85 +265,93 @@ def main() -> None:
         logger.info("No MFG assemblies. Exiting.")
         return
 
-    by_tenant: Dict[str, List[Assembly]] = {}
-    for a in all_assemblies:
-        by_tenant.setdefault(a.tenant_id, []).append(a)
-
     days = int(getattr(s, "cxo_report_days", 3) or 3)
     start_ts, now_ts = tool.last_n_days_window_ist(days=days)
     logger.info("IST window: days=%d start=%s now=%s", days, start_ts.isoformat(), now_ts.isoformat())
 
-    batch_size = int(getattr(s, "cxo_report_batch_size", 20) or 20)
+    # stable sort
+    assemblies_sorted = sorted(
+        all_assemblies,
+        key=lambda x: (x.project_name.casefold(), x.part_number.casefold(), x.legacy_id.casefold()),
+    )
 
-    parts: List[str] = []
+    # map for name fallback
+    assemblies_by_key: Dict[Tuple[str, str], Assembly] = {(a.tenant_id, a.legacy_id): a for a in all_assemblies}
 
-    for tenant_id in sorted(by_tenant.keys(), key=lambda x: x.casefold()):
-        assemblies = by_tenant[tenant_id]
-        if not assemblies:
-            continue
+    # -------- GLOBAL fetch (single DB pass per table) --------
+    logger.info("Fetching DB checkins/updates globally for %d assemblies...", len(all_assemblies))
+    checkin_rows = tool.fetch_checkins_since_for_many(
+        keys=[(a.tenant_id, a.legacy_id) for a in all_assemblies],
+        start_ts=start_ts,
+        limit_per_key=400,
+    )
+    update_rows = tool.fetch_project_updates_since_for_many(
+        keys=[(a.tenant_id, a.legacy_id) for a in all_assemblies],
+        start_ts=start_ts,
+        limit_per_key=400,
+    )
 
-        logger.info("Company=%s | assemblies=%d", tenant_id, len(assemblies))
+    # Convert DB rows -> prompt JSON (global lists)
+    checkins_json = tool.db_checkins_to_prompt_json_global(checkin_rows, assemblies_by_key)
+    updates_json = tool.db_updates_to_prompt_json_global(update_rows, assemblies_by_key)
 
-        # map once for name fallback
-        assemblies_by_legacy: Dict[str, Assembly] = {a.legacy_id: a for a in assemblies}
+    logger.info("Global events: checkins=%d updates=%d", len(checkins_json), len(updates_json))
 
-        # Sort stable
-        assemblies_sorted = sorted(
-            assemblies,
-            key=lambda x: (x.project_name.casefold(), x.part_number.casefold(), x.legacy_id.casefold()),
+    # -------- GLOBAL low visibility (computed BEFORE batching) --------
+    low = tool.compute_low_visibility(
+        assemblies=all_assemblies,
+        checkins=checkins_json,
+        updates=updates_json,
+    )
+    low_ul = tool.low_visibility_html(low)
+
+    # -------- Adaptive batching ONLY for LLM summarization --------
+    batches = _adaptive_batches(
+        assemblies_sorted=assemblies_sorted,
+        global_checkins=checkins_json,
+        global_updates=updates_json,
+        max_payload_bytes=max_payload_bytes,
+        hard_max_batch=hard_max_batch,
+    )
+    logger.info("Adaptive batches=%d (max_payload_bytes=%d hard_max_batch=%d)", len(batches), max_payload_bytes, hard_max_batch)
+
+    major_li_batches: list[list[str]] = []
+    quality_li_batches: list[list[str]] = []
+    notes: list[str] = []
+
+    # Index global events by part_number for batch filtering
+    by_pn_checkins: Dict[str, List[Dict[str, str]]] = {}
+    by_pn_updates: Dict[str, List[Dict[str, str]]] = {}
+    for c in checkins_json:
+        pn = (c.get("part_number") or "").strip()
+        if pn:
+            by_pn_checkins.setdefault(pn, []).append(c)
+    for u in updates_json:
+        pn = (u.get("part_number") or "").strip()
+        if pn:
+            by_pn_updates.setdefault(pn, []).append(u)
+
+    for bidx, batch in enumerate(batches, start=1):
+        t1 = time.time()
+        pns = [a.part_number for a in batch if (a.part_number or "").strip()]
+        batch_checkins: List[Dict[str, str]] = []
+        batch_updates: List[Dict[str, str]] = []
+        for pn in pns:
+            batch_checkins.extend(by_pn_checkins.get(pn, []))
+            batch_updates.extend(by_pn_updates.get(pn, []))
+
+        batch_assemblies_json = tool.assemblies_to_prompt_json(batch)
+
+        logger.info(
+            "Batch [%d/%d] assemblies=%d checkins=%d updates=%d | LLM call...",
+            bidx,
+            len(batches),
+            len(batch),
+            len(batch_checkins),
+            len(batch_updates),
         )
-        batches = _chunked(assemblies_sorted, batch_size)
-        logger.info("Company=%s | batch_size=%d | batches=%d", tenant_id, batch_size, len(batches))
 
-        # for global low-visibility (company-wide)
-        company_checkins_all: List[Dict[str, str]] = []
-        company_updates_all: List[Dict[str, str]] = []
-
-        # for merging major/quality across batches
-        major_li_batches: list[list[str]] = []
-        quality_li_batches: list[list[str]] = []
-
-        for bidx, batch in enumerate(batches, start=1):
-            t1 = time.time()
-            logger.info("Company=%s | Batch [%d/%d] | assemblies=%d", tenant_id, bidx, len(batches), len(batch))
-
-            batch_checkins: List[Dict[str, str]] = []
-            batch_updates: List[Dict[str, str]] = []
-
-            for a in batch:
-                checkin_rows = tool.fetch_checkins_since_for_legacy(
-                    tenant_id=tenant_id,
-                    legacy_id=a.legacy_id,
-                    start_ts=start_ts,
-                    limit=400,
-                )
-                update_rows = tool.fetch_project_updates_since_for_legacy(
-                    tenant_id=tenant_id,
-                    legacy_id=a.legacy_id,
-                    start_ts=start_ts,
-                    limit=400,
-                )
-
-                cj = tool.db_checkins_to_prompt_json(checkin_rows, assemblies_by_legacy)
-                uj = tool.db_updates_to_prompt_json(update_rows, assemblies_by_legacy)
-
-                batch_checkins.extend(cj)
-                batch_updates.extend(uj)
-
-                company_checkins_all.extend(cj)
-                company_updates_all.extend(uj)
-
-            batch_assemblies_json = tool.assemblies_to_prompt_json(batch)
-
-            logger.info(
-                "Company=%s | Batch [%d/%d] | checkins=%d updates=%d | LLM call...",
-                tenant_id,
-                bidx,
-                len(batches),
-                len(batch_checkins),
-                len(batch_updates),
-            )
-
+        try:
             html = generate_cxo_report_html(
                 settings=s,
                 all_assemblies=batch_assemblies_json,
@@ -260,32 +364,30 @@ def main() -> None:
             major_li_batches.append(_extract_section_ul_items(html, "Major Movements"))
             quality_li_batches.append(_extract_section_ul_items(html, "Quality Issues Reported"))
 
-            logger.info("Company=%s | Batch [%d/%d] | done in %.2fs", tenant_id, bidx, len(batches), time.time() - t1)
+        except Exception as e:
+            logger.exception("Batch [%d/%d] LLM failed: %s", bidx, len(batches), type(e).__name__)
+            msg = f"<li>LLM batch {bidx}/{len(batches)} failed ({type(e).__name__}). Kept low-visibility computed from data.</li>"
+            notes.append(msg)
+            if not fail_open:
+                raise
 
-        # company-wide low visibility computed by code (exhaustive)
-        low = tool.compute_low_visibility(
-            assemblies=assemblies,
-            checkins=company_checkins_all,
-            updates=company_updates_all,
-        )
-        low_ul = tool.low_visibility_html(low)
+        logger.info("Batch [%d/%d] done in %.2fs", bidx, len(batches), time.time() - t1)
 
-        major_lis = _merge_li_items(sections=major_li_batches)
-        quality_lis = _merge_li_items(sections=quality_li_batches)
+    major_lis = _merge_li_items(sections=major_li_batches)
+    quality_lis = _merge_li_items(sections=quality_li_batches)
 
-        merged_company_html = _build_final_html(
-            major_lis=major_lis,
-            quality_lis=quality_lis,
-            low_visibility_html_ul=low_ul,
-        )
+    header_html = (
+        f"<p><b>Scope:</b> Manufacturing assemblies={len(all_assemblies)} | "
+        f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')}</p>"
+    )
 
-        parts.append(_wrap_company_section(company_row_id=tenant_id, company_html=_strip_html_ws(merged_company_html)))
-
-    if not parts:
-        logger.info("No company parts produced. Exiting.")
-        return
-
-    final_html = "<hr/>".join(parts)
+    final_html = _build_final_html(
+        header_html=header_html,
+        major_lis=major_lis,
+        quality_lis=quality_lis,
+        low_visibility_html_ul=low_ul,
+        batch_note_lis=notes,
+    )
 
     # subject in IST
     try:
@@ -307,7 +409,7 @@ def main() -> None:
     client.send_html(
         EmailMessage(
             subject=subject,
-            html_body=final_html,
+            html_body=_strip_html_ws(final_html),
             to_email=to_email,
             from_email=from_email,
         )

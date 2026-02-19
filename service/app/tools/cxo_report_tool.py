@@ -215,6 +215,137 @@ class CXOReportTool:
         with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (tenant_id, legacy_id, start_ts, int(limit)))
             return list(cur.fetchall() or [])
+
+    # -------------------------
+    # Bulk fetch (DB) - many legacy_ids across many tenants
+    # -------------------------
+
+    def fetch_checkins_since_for_many(
+        self,
+        *,
+        keys: List[Tuple[str, str]],  # [(tenant_id, legacy_id), ...]
+        start_ts: datetime,
+        limit_per_key: int = 400,
+        chunk_keys: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch checkins for MANY (tenant_id, legacy_id) pairs in as few queries as possible.
+
+        NOTE: This uses a window function to cap rows per (tenant_id, legacy_id).
+        """
+        keys = [
+            (str(t or "").strip(), str(l or "").strip())
+            for (t, l) in (keys or [])
+            if str(t or "").strip() and str(l or "").strip()
+        ]
+        if not keys:
+            return []
+
+        sql = """
+        WITH wanted(tenant_id, legacy_id) AS (
+          SELECT * FROM unnest(%s::text[], %s::text[])
+        ),
+        ranked AS (
+          SELECT
+            v.checkin_id,
+            v.vector_type,
+            v.summary_text,
+            v.project_name,
+            v.part_number,
+            v.legacy_id,
+            v.status,
+            v.updated_at,
+            v.tenant_id,
+            row_number() OVER (PARTITION BY v.tenant_id, v.legacy_id ORDER BY v.updated_at DESC) AS rn
+          FROM incident_vectors v
+          JOIN wanted w
+            ON w.tenant_id=v.tenant_id AND w.legacy_id=v.legacy_id
+          WHERE v.updated_at >= %s
+        )
+        SELECT
+          checkin_id, vector_type, summary_text, project_name, part_number, legacy_id, status, updated_at, tenant_id
+        FROM ranked
+        WHERE rn <= %s
+        ORDER BY updated_at DESC
+        """
+
+        out: List[Dict[str, Any]] = []
+
+        def chunks(xs: List[Tuple[str, str]], n: int) -> List[List[Tuple[str, str]]]:
+            if n <= 0:
+                n = 200
+            return [xs[i : i + n] for i in range(0, len(xs), n)]
+
+        for ck in chunks(keys, chunk_keys):
+            tids = [t for (t, _) in ck]
+            lids = [l for (_, l) in ck]
+            with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (tids, lids, start_ts, int(limit_per_key)))
+                out.extend(list(cur.fetchall() or []))
+
+        return out
+
+    def fetch_project_updates_since_for_many(
+        self,
+        *,
+        keys: List[Tuple[str, str]],  # [(tenant_id, legacy_id), ...]
+        start_ts: datetime,
+        limit_per_key: int = 400,
+        chunk_keys: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch project updates for MANY (tenant_id, legacy_id) pairs in as few queries as possible.
+
+        NOTE: This uses a window function to cap rows per (tenant_id, legacy_id).
+        """
+        keys = [
+            (str(t or "").strip(), str(l or "").strip())
+            for (t, l) in (keys or [])
+            if str(t or "").strip() and str(l or "").strip()
+        ]
+        if not keys:
+            return []
+
+        sql = """
+        WITH wanted(tenant_id, legacy_id) AS (
+          SELECT * FROM unnest(%s::text[], %s::text[])
+        ),
+        ranked AS (
+          SELECT
+            v.update_message,
+            v.project_name,
+            v.part_number,
+            v.legacy_id,
+            v.updated_at,
+            v.tenant_id,
+            row_number() OVER (PARTITION BY v.tenant_id, v.legacy_id ORDER BY v.updated_at DESC) AS rn
+          FROM dashboard_vectors v
+          JOIN wanted w
+            ON w.tenant_id=v.tenant_id AND w.legacy_id=v.legacy_id
+          WHERE v.updated_at >= %s
+        )
+        SELECT
+          update_message, project_name, part_number, legacy_id, updated_at, tenant_id
+        FROM ranked
+        WHERE rn <= %s
+        ORDER BY updated_at DESC
+        """
+
+        out: List[Dict[str, Any]] = []
+
+        def chunks(xs: List[Tuple[str, str]], n: int) -> List[List[Tuple[str, str]]]:
+            if n <= 0:
+                n = 200
+            return [xs[i : i + n] for i in range(0, len(xs), n)]
+
+        for ck in chunks(keys, chunk_keys):
+            tids = [t for (t, _) in ck]
+            lids = [l for (_, l) in ck]
+            with self._conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, (tids, lids, start_ts, int(limit_per_key)))
+                out.extend(list(cur.fetchall() or []))
+
+        return out
     # -------------------------
     # Low visibility (strict)
     # -------------------------
@@ -318,6 +449,54 @@ class CXOReportTool:
         for r in rows or []:
             lid = _clean(r.get("legacy_id"))
             a = assemblies_by_legacy.get(lid)
+            out.append(
+                {
+                    "project_name": _clean(r.get("project_name")) or (a.project_name if a else ""),
+                    "part_number": _clean(r.get("part_number")) or (a.part_number if a else ""),
+                    "part_name": (a.part_name if a else ""),
+                    "description": _clean(r.get("update_message")),
+                    "added_by": "",
+                }
+            )
+        return out
+    
+    # -------------------------
+    # Prompt inputs formatting (GLOBAL: key = (tenant_id, legacy_id))
+    # -------------------------
+
+    @staticmethod
+    def db_checkins_to_prompt_json_global(
+        rows: List[Dict[str, Any]],
+        assemblies_by_key: Dict[Tuple[str, str], Assembly],
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in rows or []:
+            tid = _clean(r.get("tenant_id"))
+            lid = _clean(r.get("legacy_id"))
+            a = assemblies_by_key.get((tid, lid))
+            out.append(
+                {
+                    "checkin_id": _clean(r.get("checkin_id")),
+                    "project_name": _clean(r.get("project_name")) or (a.project_name if a else ""),
+                    "part_number": _clean(r.get("part_number")) or (a.part_number if a else ""),
+                    "part_name": (a.part_name if a else ""),
+                    "status": _clean(r.get("status")),
+                    "vector_type": _clean(r.get("vector_type")),
+                    "description": _clean(r.get("summary_text")),
+                }
+            )
+        return out
+
+    @staticmethod
+    def db_updates_to_prompt_json_global(
+        rows: List[Dict[str, Any]],
+        assemblies_by_key: Dict[Tuple[str, str], Assembly],
+    ) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in rows or []:
+            tid = _clean(r.get("tenant_id"))
+            lid = _clean(r.get("legacy_id"))
+            a = assemblies_by_key.get((tid, lid))
             out.append(
                 {
                     "project_name": _clean(r.get("project_name")) or (a.project_name if a else ""),

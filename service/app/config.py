@@ -339,6 +339,8 @@ class Settings:
     cxo_report_days: int
     cxo_report_batch_size: int
     smtp_use_starttls: bool
+    cxo_report_max_payload_bytes: int
+    cxo_report_fail_open: bool
 def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
@@ -361,7 +363,8 @@ def load_settings() -> Settings:
 
     cxo_report_to_email = _get_env("CXO_REPORT_TO_EMAIL", "").strip()
     cxo_report_from_email = _get_env("CXO_REPORT_FROM_EMAIL", "").strip()
-
+    cxo_report_max_payload_bytes = int(_get_env("CXO_REPORT_MAX_PAYLOAD_BYTES", "75000") or "75000")
+    cxo_report_fail_open = _get_env("CXO_REPORT_FAIL_OPEN", "1").lower() in ("1", "true", "yes", "y")
     smtp_host = _get_env("SMTP_HOST", "smtp.gmail.com").strip()
     smtp_port = int(_get_env("SMTP_PORT", "587") or "587")
     smtp_user = _get_env("SMTP_USER", "").strip()
@@ -579,6 +582,8 @@ def load_settings() -> Settings:
         cxo_report_days=cxo_report_days,
         cxo_report_batch_size=cxo_report_batch_size,
         smtp_use_starttls=smtp_use_starttls,
+        cxo_report_max_payload_bytes=cxo_report_max_payload_bytes,
+        cxo_report_fail_open=cxo_report_fail_open,
     )
 
 
