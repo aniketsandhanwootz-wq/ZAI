@@ -166,7 +166,8 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         "Added by": added_by,
         "Timestamp": ts,
         critical_col: bool(is_critical),
-    }
+        "Assigned": (state.get("checkin_created_by") or "").strip(),  # <-- add this
+        }
 
     apps.action_rows(table_name=table, action="Add", rows=[row], timeout=30)
 

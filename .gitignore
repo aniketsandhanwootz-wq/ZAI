@@ -56,6 +56,7 @@ service/scripts/*
 !service/scripts/.gitkeep
 !service/scripts/backfill_zai_cues_from_file.py
 !service/scripts/send_cxo_daily_report.py
+!service/scripts/backfill_checkin_created.py
 # still ignore secrets inside scripts explicitly (redundant but safe)
 service/scripts/credentials.json
 service/scripts/drive_token.json
