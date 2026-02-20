@@ -8,6 +8,7 @@ spreadsheet:
     ccp: "CCP"
     conversation: "Conversation"
     dashboard_update: "Dashboard Updates"
+    users_db: "Users database"
 
 columns:
   checkin:

@@ -312,7 +312,12 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
             if n8n_url:
                 run_id = (state.get("run_id") or "").strip()
                 tenant_row_id = (state.get("tenant_id") or "").strip()
-
+                # same fields as Teams (public URLs if your sources are public)
+                annotated_list = annotated_urls[:3] if isinstance(annotated_urls, list) else []
+                checkin_images = state.get("checkin_image_urls") or []
+                if not isinstance(checkin_images, list):
+                    checkin_images = []
+                created_by_phone = (state.get("created_by_phone") or "").strip()
                 n8n_payload = {
                     "type": "checkin_created",
                     "tenant_id": tenant_row_id,
@@ -324,6 +329,11 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "status": state.get("checkin_status") or "",
                     "checkin_text": state.get("checkin_description") or "",
                     "created_by": state.get("checkin_created_by") or "",
+                    "created_by_phone": created_by_phone,
+                    # ✅ add same fields as Teams
+                    "annotated_images": annotated_list,
+                    "checkin_images": checkin_images,
+                    "item_id": state.get("checkin_item_id") or "",
                 }
 
                 # Idempotency check

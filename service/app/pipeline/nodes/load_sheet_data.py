@@ -229,6 +229,18 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
         (state.get("logs") or []).append(f"Inspection image resolve failed (non-fatal): {e}")
 
     state["checkin_image_urls"] = urls
+
+    # -------------------------
+    # ✅ Lookup created_by contact number (Users database) for WhatsApp (n8n)
+    # -------------------------
+    created_by_phone = ""
+    try:
+        if created_by:
+            created_by_phone = sheets.lookup_user_contact_by_email(created_by)
+    except Exception as e:
+        (state.get("logs") or []).append(f"Users database lookup failed (non-fatal): {e}")
+
+    state["created_by_phone"] = created_by_phone or None
     # -------------------------
     # ✅ Resolve tenant_id via Project sheet (ID-first, then fallback triplet)
     # -------------------------

@@ -358,6 +358,58 @@ class SheetsTool:
 
         # Rule #3
         return None
+    
+    @staticmethod
+    def normalize_phone_digits_only(phone_raw: object) -> str:
+        """
+        Convert anything like '+91 93735-12527' -> '919373512527'
+        Rules:
+          - Keep digits only
+          - If 10-digit Indian mobile => prefix '91'
+          - If already 12 digits and startswith '91' => keep
+          - Else return digits as-is (best effort)
+        """
+        s = _norm_value(phone_raw)
+        digits = re.sub(r"\D+", "", s)
+
+        # Typical India mobile stored without country code
+        if len(digits) == 10:
+            return "91" + digits
+
+        # Already in desired format
+        if len(digits) == 12 and digits.startswith("91"):
+            return digits
+
+        return digits
+
+    def lookup_user_contact_by_email(self, email: str) -> str:
+        """
+        Lookup contact number from 'Users database' tab using 'User email' column.
+        Returns DIGITS ONLY string (e.g., '919373512527') or '' if not found.
+        """
+        want = _key(email)
+        if not want:
+            return ""
+
+        t = self._table("users_database")
+        if not t["headers"]:
+            return ""
+
+        # Columns from your screenshot:
+        #   User email, Contact
+        try:
+            i_email = self._idx(t, "User email", "users_database")
+            i_contact = self._idx(t, "Contact", "users_database")
+        except Exception:
+            return ""
+
+        for r in t["rows"]:
+            em = _key(r[i_email]) if i_email < len(r) else ""
+            if em and em == want:
+                raw = r[i_contact] if i_contact < len(r) else ""
+                return self.normalize_phone_digits_only(raw)
+
+        return ""
     # ---------- Domain readers ----------
 
     def list_dashboard_updates(self) -> List[Dict[str, Any]]:
