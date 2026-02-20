@@ -245,6 +245,8 @@ def main() -> None:
         return
 
     to_email = (getattr(s, "cxo_report_to_email", "") or "").strip()
+    if not to_email:
+        raise RuntimeError("CXO_REPORT_TO_EMAIL missing (can be comma-separated)")
     from_email = (getattr(s, "cxo_report_from_email", "") or "").strip()
     if not to_email or not from_email:
         raise RuntimeError("CXO report TO/FROM email missing")

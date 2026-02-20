@@ -7,8 +7,35 @@ from email.utils import formatdate
 import logging
 import time
 import random
+import re
+from typing import List
 
 logger = logging.getLogger("zai.email")
+def _parse_recipients(raw: str) -> List[str]:
+    """
+    Supports comma/semicolon separated lists:
+      "a@x.com, b@y.com; c@z.com"
+    Returns a de-duplicated, cleaned list.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return []
+    parts = re.split(r"[;,]+", s)
+    out: List[str] = []
+    seen = set()
+    for p in parts:
+        e = (p or "").strip()
+        if not e:
+            continue
+        # minimal sanity
+        if "@" not in e:
+            continue
+        key = e.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
 @dataclass(frozen=True)
 class EmailMessage:
     subject: str
@@ -39,10 +66,14 @@ class EmailClient:
             raise RuntimeError("SMTP password missing")
 
     def send_html(self, msg: EmailMessage) -> None:
+        recipients = _parse_recipients(msg.to_email)
+        if not recipients:
+            raise RuntimeError("No valid recipient emails in to_email")
+
         m = MIMEText(msg.html_body or "", "html", "utf-8")
         m["Subject"] = msg.subject
         m["From"] = msg.from_email
-        m["To"] = msg.to_email
+        m["To"] = ", ".join(recipients)
         m["Date"] = formatdate(localtime=True)
 
         max_attempts = 3
@@ -57,9 +88,11 @@ class EmailClient:
                         smtp.starttls()
                         smtp.ehlo()
                     smtp.login(self.username, self.password)
-                    smtp.sendmail(msg.from_email, [msg.to_email], m.as_string())
 
-                logger.info("Email sent to=%s subject=%s", msg.to_email, msg.subject)
+                    # IMPORTANT: pass the full recipient list
+                    smtp.sendmail(msg.from_email, recipients, m.as_string())
+
+                logger.info("Email sent recipients=%d to=%s subject=%s", len(recipients), ",".join(recipients), msg.subject)
                 return
 
             except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, smtplib.SMTPHeloError, smtplib.SMTPDataError, TimeoutError) as e:
