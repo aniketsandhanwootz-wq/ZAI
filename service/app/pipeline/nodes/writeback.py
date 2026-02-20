@@ -89,6 +89,21 @@ def _format_grounding_block(citations: list[dict], edge_refs: list[dict]) -> str
 
     return "\n".join([x for x in lines if str(x).strip()]).strip()
 
+def _build_appsheet_checkin_url(checkin_id: str) -> str:
+    """
+    Builds the same deep-link used in Teams: AppSheet app + view + row=<checkin_id>.
+    Example:
+      https://www.appsheet.com/start/<appId>#view=<view>&row=<checkin_id>
+    """
+    cid = (checkin_id or "").strip()
+    if not cid:
+        return ""
+
+    # Hardcode these to avoid adding new env vars
+    appsheet_app_id = "b9fe56b5-5bb2-40ca-a376-0557a85bd2c4"
+    view = "New%20Slice_Detail2%203"
+
+    return f"https://www.appsheet.com/start/{appsheet_app_id}#view={view}&row={cid}"
 
 def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     reply = (state.get("ai_reply") or "").strip()
@@ -318,10 +333,12 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 if not isinstance(checkin_images, list):
                     checkin_images = []
                 created_by_phone = (state.get("created_by_phone") or "").strip()
+                checkin_url = _build_appsheet_checkin_url(checkin_id)
                 n8n_payload = {
                     "type": "checkin_created",
                     "tenant_id": tenant_row_id,
                     "checkin_id": checkin_id,
+                    "checkin_url": checkin_url,
                     "project_name": state.get("project_name") or "",
                     "company_name": state.get("company_name") or "",
                     "ai_reply": reply_clean,
