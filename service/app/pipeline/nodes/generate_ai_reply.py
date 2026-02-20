@@ -171,7 +171,12 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         state["edge_tab_refs"] = []
         return state
     
-    technical = (out.get("technical_advice") or "").strip()
+    ta = out.get("technical_advice")
+    if isinstance(ta, list):
+        bullets = [str(x).strip() for x in ta if str(x).strip()]
+        technical = "\n".join([f"- {b}" for b in bullets[:6]])
+    else:
+        technical = str(ta or "").strip()
     if not technical:
         technical = _strip_evidence_blocks(llm.generate_text(prompt).strip())
 
