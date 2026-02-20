@@ -327,7 +327,20 @@ class Settings:
     glide_boughtouts_legacy_id_column: str
     glide_boughtouts_project_row_id_column: str
     glide_boughtouts_title_column: str
+    # ---------------- CXO report (SMTP email) ----------------
+    cxo_report_enabled: bool
+    cxo_report_to_email: str
+    cxo_report_from_email: str
 
+    smtp_host: str
+    smtp_port: int
+    smtp_user: str
+    smtp_password: str
+    cxo_report_days: int
+    cxo_report_batch_size: int
+    smtp_use_starttls: bool
+    cxo_report_max_payload_bytes: int
+    cxo_report_fail_open: bool
 def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
@@ -345,6 +358,20 @@ def load_settings() -> Settings:
     consumer_queues = _get_env("CONSUMER_QUEUES", "default")
     run_migrations = _get_env("RUN_MIGRATIONS", "0").lower() in ("1", "true", "yes")
 
+    # ---------------- CXO report (SMTP) ----------------
+    cxo_report_enabled = _get_env("CXO_REPORT_ENABLED", "0").lower() in ("1", "true", "yes", "y")
+
+    cxo_report_to_email = _get_env("CXO_REPORT_TO_EMAIL", "").strip()
+    cxo_report_from_email = _get_env("CXO_REPORT_FROM_EMAIL", "").strip()
+    cxo_report_max_payload_bytes = int(_get_env("CXO_REPORT_MAX_PAYLOAD_BYTES", "75000") or "75000")
+    cxo_report_fail_open = _get_env("CXO_REPORT_FAIL_OPEN", "1").lower() in ("1", "true", "yes", "y")
+    smtp_host = _get_env("SMTP_HOST", "smtp.gmail.com").strip()
+    smtp_port = int(_get_env("SMTP_PORT", "587") or "587")
+    smtp_user = _get_env("SMTP_USER", "").strip()
+    smtp_password = _get_env("SMTP_PASSWORD", "").strip()
+    cxo_report_days = int(_get_env("CXO_REPORT_DAYS", "3") or "3")
+    cxo_report_batch_size = int(_get_env("CXO_REPORT_BATCH_SIZE", "20") or "20")
+    smtp_use_starttls = _get_env("SMTP_USE_STARTTLS", "1").lower() in ("1", "true", "yes", "y")
     langsmith_tracing = _get_env("LANGSMITH_TRACING", _get_env("LANGCHAIN_TRACING_V2", "0")).lower() in ("1", "true", "yes")
     langsmith_project = _get_env("LANGCHAIN_PROJECT", _get_env("LANGSMITH_PROJECT", "zai")).strip() or "zai"
     langsmith_tags = _get_env("LANGSMITH_TAGS", _get_env("LANGCHAIN_TAGS", "")).strip()
@@ -398,10 +425,8 @@ def load_settings() -> Settings:
 
     drive_prefix_map = _parse_prefix_map(_get_env("DRIVE_PREFIX_MAP_JSON", ""))
 
-    # ✅ webhook secret: prefer WEBHOOK_SECRET; fallback to old APPSHEET_WEBHOOK_SECRET
     webhook_secret = _get_env("WEBHOOK_SECRET", _get_env("APPSHEET_WEBHOOK_SECRET", ""), required=True)
 
-    # Glide (env OR single JSON)
     glide_json = _parse_json_env(_get_env("GLIDE_CONFIG_JSON", ""))
 
     ov = _apply_glide_json_overrides(base=glide_json, fallback_env_get=_get_env)
@@ -545,6 +570,20 @@ def load_settings() -> Settings:
         zai_cues_log_enabled=zai_cues_log_enabled,
         zai_cues_log_spreadsheet_id=zai_cues_log_spreadsheet_id,
         zai_cues_log_tab_name=zai_cues_log_tab_name,
+
+        cxo_report_enabled=cxo_report_enabled,
+        cxo_report_to_email=cxo_report_to_email,
+        cxo_report_from_email=cxo_report_from_email,
+
+        smtp_host=smtp_host,
+        smtp_port=smtp_port,
+        smtp_user=smtp_user,
+        smtp_password=smtp_password,
+        cxo_report_days=cxo_report_days,
+        cxo_report_batch_size=cxo_report_batch_size,
+        smtp_use_starttls=smtp_use_starttls,
+        cxo_report_max_payload_bytes=cxo_report_max_payload_bytes,
+        cxo_report_fail_open=cxo_report_fail_open,
     )
 
 

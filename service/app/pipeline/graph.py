@@ -21,7 +21,7 @@ import importlib
 import logging
 import time
 from typing import Any, Callable, Dict, List
-
+import uuid
 from ..config import Settings
 from ..logctx import run_id_var
 from .ingest.run_log import RunLog
@@ -131,6 +131,7 @@ def _primary_id_for_event(payload: Dict[str, Any], event_type: str) -> str:
 
     # MANUAL / fallback
     m = _meta(payload)
+
     meta_primary = str(m.get("primary_id") or "").strip()
     return meta_primary or checkin_id or conversation_id or ccp_id or dashboard_row_id or legacy_id or "UNKNOWN"
 
@@ -155,7 +156,9 @@ def _scoped_primary_id_for_run(payload: Dict[str, Any], *, event_type: str, prim
       - ingest-only (non-media): "<id>::INGEST_V1"
     """
     m = _meta(payload)
-
+    # Allow explicit bypass for replays/backfills to avoid uq_ai_runs_idempotency collisions
+    if _truthy(m.get("bypass_idempotency")):
+        return f"{primary_id}::REPLAY::{uuid.uuid4().hex[:8]}"
     ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply"))
     media_only = _truthy(m.get("media_only"))
 
