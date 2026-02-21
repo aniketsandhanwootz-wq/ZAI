@@ -347,7 +347,6 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "checkin_text": state.get("checkin_description") or "",
                     "created_by": state.get("checkin_created_by") or "",
                     "created_by_phone": created_by_phone,
-                    # ✅ add same fields as Teams
                     "annotated_images": annotated_list,
                     "checkin_images": checkin_images,
                     "item_id": state.get("checkin_item_id") or "",

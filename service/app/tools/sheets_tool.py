@@ -382,28 +382,53 @@ class SheetsTool:
 
         return digits
 
+    def _table_any(self, tab_keys: list[str]) -> Dict[str, Any]:
+        """
+        Try multiple tab keys (mapping keys) and return the first that works.
+        Useful when mapping key names evolve.
+        """
+        last_err: Exception | None = None
+        for k in tab_keys or []:
+            try:
+                return self._table(k)
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err:
+            raise last_err
+        return {"tab_name": "", "headers": [], "keys": [], "idx": {}, "rows": []}
+    
     def lookup_user_contact_by_email(self, email: str) -> str:
         """
-        Lookup contact number from 'Users database' tab using 'User email' column.
+        Lookup contact number from Users database tab using User email column.
         Returns DIGITS ONLY string (e.g., '919373512527') or '' if not found.
         """
         want = _key(email)
         if not want:
             return ""
 
-        t = self._table("users_database")
-        if not t["headers"]:
+        # Backward compatible: support both mapping key names if you ever used users_db earlier
+        t = self._table_any(["users_database", "users_db"])
+        if not t.get("headers"):
             return ""
 
-        # Columns from your screenshot:
-        #   User email, Contact
-        try:
-            i_email = self._idx(t, "User email", "users_database")
-            i_contact = self._idx(t, "Contact", "users_database")
-        except Exception:
+        # Normalize column names lookup (supports minor header variations)
+        idx = t.get("idx", {}) or {}
+
+        def _find_col(*names: str) -> int | None:
+            for nm in names:
+                k = _key(nm)
+                if k in idx:
+                    return int(idx[k])
+            return None
+
+        i_email = _find_col("User email", "User Email", "Email", "email")
+        i_contact = _find_col("Contact", "Phone", "Phone number", "Mobile", "Mobile number")
+
+        if i_email is None or i_contact is None:
             return ""
 
-        for r in t["rows"]:
+        for r in t.get("rows", []) or []:
             em = _key(r[i_email]) if i_email < len(r) else ""
             if em and em == want:
                 raw = r[i_contact] if i_contact < len(r) else ""
