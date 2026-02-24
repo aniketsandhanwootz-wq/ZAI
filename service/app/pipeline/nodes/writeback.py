@@ -321,6 +321,7 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             (state.get("logs") or []).append(f"Teams post failed: {e}")
 
+    if (state.get("event_type") or "") == "CHECKIN_CREATED" and  is_critical:
         try:
             # n8n WhatsApp Trigger
             n8n_url = getattr(settings, "n8n_whatsapp_webhook_url", "").strip()
