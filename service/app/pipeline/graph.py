@@ -468,12 +468,15 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             }
 
     except Exception as e:
+        # Log full error details server-side for diagnostics
         runlog.error(run_id, str(e))
         logger.exception("ERROR: %s", e)
+        # Return a sanitized error object to callers to avoid leaking internals
         return {
             "run_id": run_id,
             "ok": False,
-            "error": str(e),
+            "error": "Internal error during event processing",
+            "error_type": type(e).__name__,
             "primary_id": primary_id,
             "event_type": event_type,
             "logs": state.get("logs"),
