@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -57,7 +57,8 @@ class AppSheetClient:
 
         base = (s.appsheet_base_url or "https://api.appsheet.com").strip().rstrip("/")
         # Safety: if user sets www host, swap to api host (AppSheet API expects api.appsheet.com)
-        if "www.appsheet.com" in base:
+        parsed = urlparse(base)
+        if parsed.hostname == "www.appsheet.com":
             base = "https://api.appsheet.com"
 
         return AppSheetCuesConfig(
@@ -76,7 +77,8 @@ class AppSheetClient:
     def _base_cfg(self) -> tuple[str, str, str]:
         s = self.settings
         base = (s.appsheet_base_url or "https://api.appsheet.com").strip().rstrip("/")
-        if "www.appsheet.com" in base:
+        parsed = urlparse(base)
+        if parsed.hostname == "www.appsheet.com":
             base = "https://api.appsheet.com"
         app_id = (s.appsheet_app_id or "").strip()
         key = (s.appsheet_access_key or "").strip()
