@@ -24,7 +24,7 @@ langsmith
 
 
 pyyaml==6.0.3
-pypdf==6.7.4
+pypdf==6.7.5
 
 Pillow==12.1.1
 
