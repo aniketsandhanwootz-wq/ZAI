@@ -3,22 +3,21 @@ from __future__ import annotations
 
 import base64
 import json
-import os
-from typing import Any, Dict, List
-from .langsmith_trace import traceable_wrap, mk_http_meta
-import requests
-import base64
-import json
-import os
 import logging
+import os
 import random
+import re
 import time
 from typing import Any, Dict, List
-from .langsmith_trace import traceable_wrap, mk_http_meta, tracing_context
+
 import requests
+
 from ..config import Settings
+from .langsmith_trace import mk_http_meta, traceable_wrap, tracing_context
 
 logger = logging.getLogger("zai.llm")
+
+
 def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode("utf-8")
 
@@ -84,11 +83,93 @@ def _is_retryable_http(status: int) -> bool:
     return status in (408, 429, 500, 502, 503, 504)
 
 
+def _split_csv(raw: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for part in str(raw or "").split(","):
+        p = part.strip()
+        if not p or p in seen:
+            continue
+        out.append(p)
+        seen.add(p)
+    return out
+
+
+def _model_candidates(primary: str, fallback_csv: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for m in [primary] + _split_csv(fallback_csv):
+        mm = (m or "").strip()
+        if not mm or mm in seen:
+            continue
+        out.append(mm)
+        seen.add(mm)
+    return out
+
+
+def _extract_http_codes(msg: str) -> set[int]:
+    out: set[int] = set()
+    for tok in re.findall(r"\b(4\d\d|5\d\d)\b", str(msg or "")):
+        try:
+            out.add(int(tok))
+        except Exception:
+            continue
+    return out
+
+
+def _is_fallback_eligible_error(err: Exception) -> bool:
+    """
+    Fallback only on rate-limit/quota/transient failures.
+    Avoid fallback for auth/config/model errors.
+    """
+    s = str(err or "").lower()
+
+    hard_no = (
+        "invalid api key",
+        "permission denied",
+        "unauthorized",
+        "forbidden",
+        "not found",
+        "unsupported model",
+        "unknown model",
+        "invalid argument",
+    )
+    if any(h in s for h in hard_no):
+        return False
+
+    hints = (
+        "rate limit",
+        "too many requests",
+        "resource_exhausted",
+        "quota",
+        "exceeded your current quota",
+        "temporarily unavailable",
+        "overloaded",
+        "deadline exceeded",
+        "timed out",
+        "timeout",
+        "connectionerror",
+        "connect timeout",
+        "read timeout",
+    )
+    if any(h in s for h in hints):
+        return True
+
+    codes = _extract_http_codes(s)
+    if any(c in (401, 403, 404, 422) for c in codes):
+        return False
+    if any(c in (408, 429, 500, 502, 503, 504) for c in codes):
+        return True
+
+    return False
+
+
 def _post_with_retry(
     session: requests.Session,
     *,
     url: str,
     payload: dict,
+    headers: Dict[str, str] | None = None,
     timeout_s: float,
     max_attempts: int,
 ) -> requests.Response:
@@ -97,7 +178,7 @@ def _post_with_retry(
     for attempt in range(max_attempts):
         try:
             with tracing_context(metadata={"http": mk_http_meta(url=url, payload=payload, timeout_s=timeout_s)}):
-                r = session.post(url, json=payload, timeout=timeout_s)
+                r = session.post(url, json=payload, headers=headers, timeout=timeout_s)
             if r.ok:
                 return r
 
@@ -128,6 +209,8 @@ def _post_with_retry(
     if last_err:
         raise last_err
     raise RuntimeError("LLM call failed (unknown)")
+
+
 class LLMTool:
     """
     Supports:
@@ -139,6 +222,11 @@ class LLMTool:
         self.settings = settings
         self._session = requests.Session()
 
+    def _candidate_models(self, default_model: str) -> List[str]:
+        primary = (self.settings.llm_model or "").strip() or default_model
+        fallback_csv = (getattr(self.settings, "llm_fallback_models", "") or "").strip()
+        return _model_candidates(primary, fallback_csv)
+
     def generate_text(self, prompt: str) -> str:
         provider = self.settings.llm_provider
 
@@ -146,59 +234,123 @@ class LLMTool:
             base = os.getenv("LLM_BASE_URL", "https://api.openai.com").rstrip("/")
             url = f"{base}/v1/chat/completions"
             headers = {"Authorization": f"Bearer {self.settings.llm_api_key}"}
-            payload = {
-                "model": self.settings.llm_model,
-                "messages": [
-                    {"role": "system", "content": "You are a helpful manufacturing quality assistant."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
-            }
-            def _call() -> str:
-                r = requests.post(url, json=payload, headers=headers, timeout=120)
-                r.raise_for_status()
-                data = r.json()
-                return data["choices"][0]["message"]["content"].strip()
+            timeout_s = _env_float("LLM_TIMEOUT_S", 120.0)
+            max_attempts = _env_int("LLM_MAX_ATTEMPTS", 4)
+            models = self._candidate_models(default_model="gpt-4o-mini")
 
-            traced = traceable_wrap(_call, name="llm.openai_compat.generate_text", run_type="llm")
-            return traced()
+            last_err: Exception | None = None
+            for i, model in enumerate(models):
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful manufacturing quality assistant."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.2,
+                }
+
+                def _call() -> str:
+                    pbytes = _json_bytes(payload)
+                    logger.info("openai_compat.generate_text payload_bytes=%d model=%s", pbytes, model)
+
+                    r = _post_with_retry(
+                        self._session,
+                        url=url,
+                        payload=payload,
+                        headers=headers,
+                        timeout_s=timeout_s,
+                        max_attempts=max_attempts,
+                    )
+
+                    data = r.json()
+                    return data["choices"][0]["message"]["content"].strip()
+
+                traced = traceable_wrap(_call, name="llm.openai_compat.generate_text", run_type="llm")
+                try:
+                    out = traced()
+                    if i > 0:
+                        logger.warning(
+                            "LLM fallback success provider=openai_compat selected_model=%s primary_model=%s",
+                            model,
+                            models[0],
+                        )
+                    return out
+                except Exception as e:
+                    last_err = e
+                    if i < len(models) - 1 and _is_fallback_eligible_error(e):
+                        logger.warning(
+                            "LLM fallback triggered provider=openai_compat from_model=%s to_model=%s err=%s",
+                            model,
+                            models[i + 1],
+                            str(e)[:280],
+                        )
+                        continue
+                    raise
+
+            if last_err:
+                raise last_err
+            raise RuntimeError("openai_compat.generate_text failed with no error details")
 
         if provider == "gemini":
             base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
-            model = self.settings.llm_model or "gemini-2.5-flash"
+            models = self._candidate_models(default_model="gemini-2.5-flash")
             key = self.settings.llm_api_key
-            url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+            timeout_s = _env_float("LLM_TIMEOUT_S", 120.0)
+            max_attempts = _env_int("LLM_MAX_ATTEMPTS", 4)
 
-            payload = {
-                "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.2},
-            }
+            last_err: Exception | None = None
+            for i, model in enumerate(models):
+                url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+                payload = {
+                    "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.2},
+                }
 
-            def _call() -> str:
-                timeout_s = _env_float("LLM_TIMEOUT_S", 120.0)
-                max_attempts = _env_int("LLM_MAX_ATTEMPTS", 4)
+                def _call() -> str:
+                    pbytes = _json_bytes(payload)
+                    logger.info("gemini.generate_text payload_bytes=%d model=%s", pbytes, model)
 
-                pbytes = _json_bytes(payload)
-                logger.info("gemini.generate_text payload_bytes=%d model=%s", pbytes, model)
+                    r = _post_with_retry(
+                        self._session,
+                        url=url,
+                        payload=payload,
+                        timeout_s=timeout_s,
+                        max_attempts=max_attempts,
+                    )
 
-                r = _post_with_retry(
-                    self._session,
-                    url=url,
-                    payload=payload,
-                    timeout_s=timeout_s,
-                    max_attempts=max_attempts,
-                )
+                    data = r.json()
+                    candidates = data.get("candidates", []) or []
+                    if not candidates:
+                        return ""
+                    parts = candidates[0].get("content", {}).get("parts", []) or []
+                    return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
 
-                data = r.json()
-                candidates = data.get("candidates", []) or []
-                if not candidates:
-                    return ""
-                parts = candidates[0].get("content", {}).get("parts", []) or []
-                return "".join([p.get("text", "") for p in parts if isinstance(p, dict)]).strip()
+                traced = traceable_wrap(_call, name="llm.gemini.generate_text", run_type="llm")
+                try:
+                    out = traced()
+                    if i > 0:
+                        logger.warning(
+                            "LLM fallback success provider=gemini selected_model=%s primary_model=%s",
+                            model,
+                            models[0],
+                        )
+                    return out
+                except Exception as e:
+                    last_err = e
+                    if i < len(models) - 1 and _is_fallback_eligible_error(e):
+                        logger.warning(
+                            "LLM fallback triggered provider=gemini from_model=%s to_model=%s err=%s",
+                            model,
+                            models[i + 1],
+                            str(e)[:280],
+                        )
+                        continue
+                    raise
 
-            traced = traceable_wrap(_call, name="llm.gemini.generate_text", run_type="llm")
-            return traced()
+            if last_err:
+                raise last_err
+            raise RuntimeError("gemini.generate_text failed with no error details")
         raise RuntimeError(f"Unsupported LLM_PROVIDER={provider}")
 
     def generate_json_with_images(
@@ -217,9 +369,10 @@ class LLMTool:
             return _extract_json(self.generate_text(prompt))
 
         base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
-        model = self.settings.llm_model or "gemini-2.5-flash"
+        models = self._candidate_models(default_model="gemini-2.5-flash")
         key = self.settings.llm_api_key
-        url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+        timeout_s = _env_float("LLM_VISION_TIMEOUT_S", 180.0)
+        max_attempts = _env_int("LLM_MAX_ATTEMPTS", 4)
 
         parts: List[Dict[str, Any]] = [{"text": prompt}]
         for img in images or []:
@@ -229,35 +382,63 @@ class LLMTool:
             mime = (img.get("mime_type") or "image/jpeg").strip()
             parts.append({"inlineData": {"mimeType": mime, "data": _b64(bytes(b))}})
 
-        payload = {
-            "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
-            "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"temperature": float(temperature)},
-        }
+        last_err: Exception | None = None
+        for i, model in enumerate(models):
+            url = f"{base}/v1beta/models/{model}:generateContent?key={key}"
+            payload = {
+                "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"temperature": float(temperature)},
+            }
 
-        def _call() -> Dict[str, Any]:
-            timeout_s = _env_float("LLM_VISION_TIMEOUT_S", 180.0)
-            max_attempts = _env_int("LLM_MAX_ATTEMPTS", 4)
+            def _call() -> Dict[str, Any]:
+                pbytes = _json_bytes(payload)
+                logger.info(
+                    "gemini.generate_json_with_images payload_bytes=%d model=%s images=%d",
+                    pbytes,
+                    model,
+                    len(images or []),
+                )
 
-            pbytes = _json_bytes(payload)
-            logger.info("gemini.generate_json_with_images payload_bytes=%d model=%s images=%d", pbytes, model, len(images or []))
+                r = _post_with_retry(
+                    self._session,
+                    url=url,
+                    payload=payload,
+                    timeout_s=timeout_s,
+                    max_attempts=max_attempts,
+                )
 
-            r = _post_with_retry(
-                self._session,
-                url=url,
-                payload=payload,
-                timeout_s=timeout_s,
-                max_attempts=max_attempts,
-            )
+                data = r.json()
+                candidates = data.get("candidates", []) or []
+                if not candidates:
+                    return {}
 
-            data = r.json()
-            candidates = data.get("candidates", []) or []
-            if not candidates:
-                return {}
+                out_parts = candidates[0].get("content", {}).get("parts", []) or []
+                text = "".join([p.get("text", "") for p in out_parts if isinstance(p, dict)]).strip()
+                return _extract_json(text)
 
-            out_parts = candidates[0].get("content", {}).get("parts", []) or []
-            text = "".join([p.get("text", "") for p in out_parts if isinstance(p, dict)]).strip()
-            return _extract_json(text)
+            traced = traceable_wrap(_call, name="llm.gemini.generate_json_with_images", run_type="llm")
+            try:
+                out = traced()
+                if i > 0:
+                    logger.warning(
+                        "LLM fallback success provider=gemini multimodal selected_model=%s primary_model=%s",
+                        model,
+                        models[0],
+                    )
+                return out
+            except Exception as e:
+                last_err = e
+                if i < len(models) - 1 and _is_fallback_eligible_error(e):
+                    logger.warning(
+                        "LLM fallback triggered provider=gemini multimodal from_model=%s to_model=%s err=%s",
+                        model,
+                        models[i + 1],
+                        str(e)[:280],
+                    )
+                    continue
+                raise
 
-        traced = traceable_wrap(_call, name="llm.gemini.generate_json_with_images", run_type="llm")
-        return traced()
+        if last_err:
+            raise last_err
+        raise RuntimeError("gemini.generate_json_with_images failed with no error details")

@@ -265,6 +265,7 @@ class Settings:
     llm_provider: str
     llm_api_key: str
     llm_model: str
+    llm_fallback_models: str
 
     embedding_provider: str
     embedding_api_key: str
@@ -345,6 +346,7 @@ def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
     llm_model = _get_env("LLM_MODEL", "gpt-4o-mini")
+    llm_fallback_models = _get_env("LLM_FALLBACK_MODELS", "")
 
     # n8n WhatsApp integration
     n8n_whatsapp_webhook_url = _get_env("N8N_WHATSAPP_WEBHOOK_URL", "")
@@ -511,6 +513,7 @@ def load_settings() -> Settings:
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
         llm_model=llm_model,
+        llm_fallback_models=llm_fallback_models,
         embedding_provider=embedding_provider,
         embedding_api_key=embedding_api_key,
         embedding_model=embedding_model,
