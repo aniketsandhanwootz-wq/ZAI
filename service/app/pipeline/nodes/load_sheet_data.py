@@ -55,6 +55,21 @@ def _norm_header(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _split_multi_contacts(raw: str) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for tok in re.split(r"[,\n;]+", str(raw or "")):
+        v = _norm_value(tok)
+        if not v:
+            continue
+        k = _key(v)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(v)
+    return out
+
+
 def _find_row_value(row: Dict[str, Any], *, preferred_key: Optional[str], fallbacks: List[str]) -> str:
     """
     Return the first NON-EMPTY value.
@@ -284,6 +299,36 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
 
     state["project_row"] = project_row
     state["tenant_id"] = tenant_id or None
+
+    # -------------------------
+    # ✅ Lookup Internal POC contact numbers (from Project.Internal POC -> Users database)
+    # -------------------------
+    internal_poc_raw = ""
+    internal_poc_emails: List[str] = []
+    internal_poc_phones: List[str] = []
+    try:
+        if project_row:
+            k_p_internal_poc = _key(sheets.map.col("project", "internal_poc"))
+            internal_poc_raw = _norm_value(project_row.get(k_p_internal_poc, ""))
+
+        if not internal_poc_raw:
+            src = project_row or {}
+            if src:
+                internal_poc_raw = _find_row_value(
+                    src,
+                    preferred_key=None,
+                    fallbacks=["Internal POC", "Internal POCs", "POC", "POCs"],
+                )
+
+        internal_poc_emails = _split_multi_contacts(internal_poc_raw)
+        for em in internal_poc_emails:
+            ph = sheets.lookup_user_contact_by_email(em)
+            if ph and ph not in internal_poc_phones:
+                internal_poc_phones.append(ph)
+    except Exception as e:
+        (state.get("logs") or []).append(f"Internal POC lookup failed (non-fatal): {e}")
+
+    state["internal_poc_phones"] = internal_poc_phones
 
     convo_rows = []
     if checkin_id:

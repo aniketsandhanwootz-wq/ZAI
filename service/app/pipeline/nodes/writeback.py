@@ -334,6 +334,10 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 if not isinstance(checkin_images, list):
                     checkin_images = []
                 created_by_phone = (state.get("created_by_phone") or "").strip()
+                internal_poc_phones = state.get("internal_poc_phones") or []
+                if not isinstance(internal_poc_phones, list):
+                    internal_poc_phones = []
+                internal_poc_phones = [str(x).strip() for x in internal_poc_phones if str(x).strip()]
                 checkin_url = _build_appsheet_checkin_url(checkin_id)
                 n8n_payload = {
                     "type": "checkin_created",
@@ -348,6 +352,7 @@ def writeback(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
                     "checkin_text": state.get("checkin_description") or "",
                     "created_by": state.get("checkin_created_by") or "",
                     "created_by_phone": created_by_phone,
+                    "internal_poc_phones": internal_poc_phones,
                     "annotated_images": annotated_list,
                     "checkin_images": checkin_images,
                     "item_id": state.get("checkin_item_id") or "",
