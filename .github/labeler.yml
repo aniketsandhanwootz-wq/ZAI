@@ -1,0 +1,7 @@
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "service/requirements.txt"
+          - "**/requirements*.txt"
+          - "**/pyproject.toml"
+          - "**/poetry.lock"
