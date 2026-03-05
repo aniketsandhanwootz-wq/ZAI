@@ -243,23 +243,41 @@ def _is_none_text(v: object) -> bool:
 def _split_multiline_items(v: object) -> List[str]:
     s = str(v or "")
     out: List[str] = []
-    seen: set[str] = set()
     for ln in s.splitlines():
         x = ln.strip().lstrip("-").strip()
         if not x:
             continue
-        k = x.casefold()
-        if k in seen:
-            continue
-        seen.add(k)
         out.append(x)
     return out
+
+
+def _is_email(s: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", (s or "").strip()))
+
+
+def _email_display_name(email: str) -> str:
+    e = (email or "").strip()
+    local = e.split("@", 1)[0].strip()
+    if not local:
+        return e
+    parts = [p for p in re.split(r"[._-]+", local) if p]
+    if not parts:
+        return local.title()
+    return " ".join([p.capitalize() for p in parts])
 
 
 def _render_people_cell(v: str) -> str:
     if _is_none_text(v):
         return "None"
-    people = [escape(x) for x in re.split(r"[,;\n]+", v or "") if x.strip()]
+    people_raw = [x.strip() for x in re.split(r"[,;\n]+", v or "") if x.strip()]
+    people: List[str] = []
+    for p in people_raw:
+        if _is_email(p):
+            label = escape(_email_display_name(p))
+            href = escape(p, quote=True)
+            people.append(f"<a href='mailto:{href}'>{label}</a>")
+        else:
+            people.append(escape(p))
     if not people:
         return "None"
     return "<br/>".join(people)
@@ -301,11 +319,15 @@ def _format_dispatch_date(v: str) -> str:
     return ", ".join([_one(p) for p in parts])
 
 
-def _render_detail_cell(v: str) -> str:
+def _render_detail_cell(v: str, *, none_light_red: bool = False) -> str:
     if _is_none_text(v):
+        if none_light_red:
+            return "<span style='color:#ff9b9b;'>None</span>"
         return "None"
     items = [escape(x) for x in _split_multiline_items(v)]
     if not items:
+        if none_light_red:
+            return "<span style='color:#ff9b9b;'>None</span>"
         return "None"
     if len(items) == 1:
         return items[0]
@@ -333,28 +355,37 @@ def _build_table_report_html(
         dispatch_disp = _format_dispatch_date(r.dispatch_date)
         ids = _split_ids(r.legacy_id)
         project_cell = escape(", ".join(ids) if ids else (r.legacy_id or "NA"))
+        both_none = _is_none_text(r.major_movements) and _is_none_text(r.quality_issues)
         table_rows.append(
             "<tr>"
             f"<td>{project_cell}</td>"
+            f"<td>{escape(dispatch_disp)}</td>"
+            f"<td>{_render_detail_cell(r.major_movements, none_light_red=both_none)}</td>"
+            f"<td>{_render_detail_cell(r.quality_issues, none_light_red=both_none)}</td>"
             f"<td>{_render_people_cell(r.pocs)}</td>"
             f"<td>{_render_people_cell(r.vendor)}</td>"
-            f"<td>{escape(dispatch_disp)}</td>"
-            f"<td>{_render_detail_cell(r.major_movements)}</td>"
-            f"<td>{_render_detail_cell(r.quality_issues)}</td>"
             "</tr>"
         )
 
     table_html = (
         "<table border='1' cellpadding='6' cellspacing='0' "
         "style='border-collapse:collapse; width:100%; font-family:Arial,sans-serif; font-size:13px;'>"
+        "<colgroup>"
+        "<col style='width:20%;'/>"
+        "<col style='width:8%;'/>"
+        "<col style='width:25%;'/>"
+        "<col style='width:25%;'/>"
+        "<col style='width:12%;'/>"
+        "<col style='width:10%;'/>"
+        "</colgroup>"
         "<thead>"
         "<tr>"
         "<th align='left'>Project</th>"
-        "<th align='left'>POCs</th>"
-        "<th align='left'>Vendor</th>"
         "<th align='left'>Dispatch Date</th>"
         "<th align='left'>Major Movements</th>"
         "<th align='left'>Quality Issues Reported (if any)</th>"
+        "<th align='left'>POCs</th>"
+        "<th align='left'>Vendor</th>"
         "</tr>"
         "</thead>"
         "<tbody>"
