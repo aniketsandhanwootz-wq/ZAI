@@ -472,6 +472,87 @@ class SheetsTool:
             return []
         return [self._row_to_dict(t, r) for r in t["rows"]]
 
+    def list_supplier_capmap(self) -> List[Dict[str, Any]]:
+        t = self._table("supplier_capmap")
+        if not t["headers"]:
+            return []
+        return [self._row_to_dict(t, r) for r in t["rows"]]
+
+    @staticmethod
+    def parse_multi_ids(raw: object) -> List[str]:
+        """
+        Parse comma/newline/semicolon separated values.
+        Keeps insertion order and drops empty/duplicate items.
+        """
+        s = str(raw or "")
+        if not s.strip():
+            return []
+
+        out: List[str] = []
+        seen: set[str] = set()
+        for tok in re.split(r"[,\n;]+", s):
+            v = _norm_value(tok)
+            if not v:
+                continue
+            k = _key(v)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(v)
+        return out
+
+    def build_supplier_company_map(self) -> Dict[str, str]:
+        """
+        Build normalized supplier-id -> company-name map from Suppliers capmap tab.
+        """
+        rows = self.list_supplier_capmap()
+        if not rows:
+            return {}
+
+        col_supplier_id = _key(self.map.col("supplier_capmap", "supplier_id"))
+        col_company_name = _key(self.map.col("supplier_capmap", "company_name"))
+
+        out: Dict[str, str] = {}
+        for r in rows:
+            sid = _norm_value(r.get(col_supplier_id, ""))
+            cname = _norm_value(r.get(col_company_name, ""))
+            if not sid or not cname:
+                continue
+            ks = _key(sid)
+            if ks in out:
+                continue
+            out[ks] = cname
+        return out
+
+    def resolve_supplier_names(
+        self,
+        vendor_ids_raw: object,
+        *,
+        supplier_company_map: Optional[Dict[str, str]] = None,
+        keep_unmapped_ids: bool = True,
+    ) -> List[str]:
+        """
+        Resolve supplier IDs (from Project.Vendor POC) to supplier company names.
+        """
+        ids = self.parse_multi_ids(vendor_ids_raw)
+        if not ids:
+            return []
+
+        mapping = supplier_company_map if supplier_company_map is not None else self.build_supplier_company_map()
+        out: List[str] = []
+        seen: set[str] = set()
+        for sid in ids:
+            name = mapping.get(_key(sid), sid if keep_unmapped_ids else "")
+            name = _norm_value(name)
+            if not name:
+                continue
+            kn = _key(name)
+            if kn in seen:
+                continue
+            seen.add(kn)
+            out.append(name)
+        return out
+
     def get_project_row(self, project_name: str, part_number: str, legacy_id: str) -> Optional[Dict[str, Any]]:
         """
         Slow path (scan).

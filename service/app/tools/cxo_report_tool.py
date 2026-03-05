@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Literal
 from datetime import datetime
@@ -17,6 +18,41 @@ def _cf(x: object) -> str:
 
 def _clean(x: object) -> str:
     return str(x or "").strip()
+
+
+def _split_multi_values(raw: object) -> List[str]:
+    s = str(raw or "")
+    if not s.strip():
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for tok in s.replace("|", ",").splitlines():
+        for part in tok.split(","):
+            for one in part.split(";"):
+                v = _clean(one)
+                if not v:
+                    continue
+                k = _cf(v)
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(v)
+    return out
+
+
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for it in items or []:
+        v = _clean(it)
+        if not v:
+            continue
+        k = _cf(v)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(v)
+    return out
 
 
 def _parse_dispatch_ddmm(s: str) -> str:
@@ -42,6 +78,30 @@ def _parse_dispatch_ddmm(s: str) -> str:
     return t
 
 
+def _parse_dispatch_dt(s: str) -> Optional[datetime]:
+    t = _clean(s)
+    if not t:
+        return None
+
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(t, fmt)
+        except Exception:
+            pass
+
+    try:
+        return datetime.fromisoformat(t.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _dispatch_sort_key(s: str) -> Tuple[int, datetime]:
+    dt = _parse_dispatch_dt(s)
+    if dt is None:
+        return (1, datetime.max)
+    return (0, dt)
+
+
 def _is_mfg_status(s: str) -> bool:
     v = _cf(s)
     return v in ("mfg", "manufacturing", "in mfg", "in manufacturing")
@@ -60,6 +120,18 @@ class Assembly:
     status_assembly: str        # Project.Status_assembly
 
 
+@dataclass(frozen=True)
+class CXOTableRow:
+    tenant_id: str
+    legacy_id: str
+    project: str
+    pocs: str
+    vendor: str
+    dispatch_date: str
+    major_movements: str
+    quality_issues: str
+
+
 class CXOReportTool:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -75,22 +147,50 @@ class CXOReportTool:
         rows = sheets.list_projects()
         out: List[Assembly] = []
 
-        for r in rows:
-            tenant_id = _clean(r.get("company row id"))
-            project_name = _clean(r.get("project name"))
-            part_number = _clean(r.get("part number"))
-            legacy_id = _clean(r.get("id"))
-            dispatch_date = _clean(r.get("dispatch date"))
-            internal_poc = _clean(r.get("internal poc"))
+        # Resolve project/supplier columns from mapping to avoid hardcoded header drift.
+        k_tenant = _cf(sheets.map.col("project", "company_row_id"))
+        k_project_name = _cf(sheets.map.col("project", "project_name"))
+        k_part_number = _cf(sheets.map.col("project", "part_number"))
+        k_legacy_id = _cf(sheets.map.col("project", "legacy_id"))
+        k_dispatch_date = _cf(sheets.map.col("project", "dispatch_date"))
+        k_internal_poc = _cf(sheets.map.col("project", "internal_poc"))
+        k_status_assembly = _cf(sheets.map.col("project", "status_assembly"))
 
-            status_assembly = _clean(r.get("status_assembly"))
+        k_vendor_poc: str = ""
+        try:
+            k_vendor_poc = _cf(sheets.map.col("project", "vendor_poc"))
+        except Exception:
+            k_vendor_poc = ""
+
+        supplier_map: Dict[str, str] = {}
+        try:
+            supplier_map = sheets.build_supplier_company_map()
+        except Exception:
+            supplier_map = {}
+
+        for r in rows:
+            tenant_id = _clean(r.get(k_tenant))
+            project_name = _clean(r.get(k_project_name))
+            part_number = _clean(r.get(k_part_number))
+            legacy_id = _clean(r.get(k_legacy_id))
+            dispatch_date = _clean(r.get(k_dispatch_date))
+            internal_poc = _clean(r.get(k_internal_poc))
+            status_assembly = _clean(r.get(k_status_assembly))
 
             part_name = _clean(r.get("part name")) or _clean(r.get("part")) or _clean(r.get("part title"))
-            vendor_poc = (
-                _clean(r.get("vendor/supplier poc"))
-                or _clean(r.get("vendor poc"))
-                or _clean(r.get("supplier poc"))
+            vendor_ids_raw = _clean(r.get(k_vendor_poc)) if k_vendor_poc else ""
+            if not vendor_ids_raw:
+                vendor_ids_raw = (
+                    _clean(r.get("vendor/supplier poc"))
+                    or _clean(r.get("vendor poc"))
+                    or _clean(r.get("supplier poc"))
+                )
+            resolved_vendor_names = sheets.resolve_supplier_names(
+                vendor_ids_raw,
+                supplier_company_map=supplier_map,
+                keep_unmapped_ids=True,
             )
+            vendor_poc = ", ".join(resolved_vendor_names) if resolved_vendor_names else vendor_ids_raw
 
             if not tenant_id or not legacy_id or not project_name or not part_number:
                 continue
@@ -583,3 +683,192 @@ class CXOReportTool:
                 }
             )
         return out
+
+    # -------------------------
+    # Deterministic table report (no LLM)
+    # -------------------------
+
+    @staticmethod
+    def is_none_text(v: object) -> bool:
+        t = _cf(v)
+        return not t or t in {"none", "na", "n/a", "nil", "-", "--"}
+
+    @staticmethod
+    def _is_quality_signal(v: object) -> bool:
+        t = _cf(v)
+        if not t:
+            return False
+        keywords = (
+            "issue",
+            "issues",
+            "quality",
+            "reject",
+            "rejected",
+            "rejection",
+            "fail",
+            "failed",
+            "defect",
+            "deviation",
+            "doubt",
+            "missing",
+            "damage",
+            "non conform",
+            "nc",
+            "rework",
+            "hold",
+            "wip hold",
+            "problem",
+            "critical",
+        )
+        return any(k in t for k in keywords)
+
+    @staticmethod
+    def _event_sort_key(r: Dict[str, Any]) -> Tuple[int, datetime]:
+        v = r.get("created_at")
+        if isinstance(v, datetime):
+            return (0, v)
+        s = _clean(v)
+        if not s:
+            return (1, datetime.max)
+        try:
+            return (0, datetime.fromisoformat(s.replace("Z", "+00:00")))
+        except Exception:
+            return (1, datetime.max)
+
+    def build_cxo_table_rows(
+        self,
+        *,
+        assemblies: List[Assembly],
+        checkin_rows: List[Dict[str, Any]],
+        update_rows: List[Dict[str, Any]],
+    ) -> List[CXOTableRow]:
+        """
+        Build one deterministic row per (tenant_id, legacy_id) assembly.
+        """
+        by_checkins: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        by_updates: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+
+        for r in checkin_rows or []:
+            key = (_clean(r.get("tenant_id")), _clean(r.get("legacy_id")))
+            if key[0] and key[1]:
+                by_checkins[key].append(r)
+
+        for r in update_rows or []:
+            key = (_clean(r.get("tenant_id")), _clean(r.get("legacy_id")))
+            if key[0] and key[1]:
+                by_updates[key].append(r)
+
+        out: List[CXOTableRow] = []
+
+        for a in assemblies or []:
+            key = (a.tenant_id, a.legacy_id)
+            c_rows = sorted(by_checkins.get(key, []), key=self._event_sort_key)
+            u_rows = sorted(by_updates.get(key, []), key=self._event_sort_key)
+
+            major_items: List[str] = []
+            quality_items: List[str] = []
+
+            # Dashboard updates are project progress movements.
+            for u in u_rows:
+                msg = _clean(u.get("update_message"))
+                if msg:
+                    major_items.append(msg)
+                    if self._is_quality_signal(msg):
+                        quality_items.append(msg)
+
+            # Incident vectors:
+            # - PROBLEM and quality-signals -> quality
+            # - RESOLUTION/MEDIA/other non-problem -> major movement
+            for c in c_rows:
+                vt = _cf(c.get("vector_type"))
+                txt = _clean(c.get("summary_text"))
+                status = _clean(c.get("status"))
+
+                if vt == "problem" or self._is_quality_signal(txt) or self._is_quality_signal(status):
+                    quality_items.append(txt or status)
+
+                if vt in {"resolution", "media"}:
+                    if txt:
+                        major_items.append(txt)
+                elif vt and vt != "problem":
+                    if txt:
+                        major_items.append(txt)
+
+            major_items = _dedupe_keep_order(major_items)
+            quality_items = _dedupe_keep_order(quality_items)
+
+            pocs = ", ".join(_dedupe_keep_order(_split_multi_values(a.internal_poc)))
+            vendors = ", ".join(_dedupe_keep_order(_split_multi_values(a.vendor_poc)))
+
+            out.append(
+                CXOTableRow(
+                    tenant_id=a.tenant_id,
+                    legacy_id=a.legacy_id,
+                    project=a.project_name,
+                    pocs=pocs or "None",
+                    vendor=vendors or "None",
+                    dispatch_date=_clean(a.dispatch_date),
+                    major_movements="\n".join(major_items) if major_items else "None",
+                    quality_issues="\n".join(quality_items) if quality_items else "None",
+                )
+            )
+
+        return out
+
+    def merge_rows_when_both_none(self, rows: List[CXOTableRow]) -> List[CXOTableRow]:
+        """
+        Merge rule (strict):
+        - merge_eligible == (major is None) AND (quality is None)
+        - merge by normalized project name
+        - inside merged group sort by dispatch_date ascending
+        - keep ALL none-none groups at the end of output
+        """
+        if not rows:
+            return []
+
+        normal_rows: List[CXOTableRow] = []
+        none_rows: List[CXOTableRow] = []
+        for r in rows:
+            if self.is_none_text(r.major_movements) and self.is_none_text(r.quality_issues):
+                none_rows.append(r)
+            else:
+                normal_rows.append(r)
+
+        if not none_rows:
+            return rows
+
+        groups: Dict[Tuple[str, str], List[CXOTableRow]] = defaultdict(list)
+        for r in none_rows:
+            groups[(_cf(r.tenant_id), _cf(r.project))].append(r)
+
+        merged_none_rows: List[CXOTableRow] = []
+        for _, grp in groups.items():
+            grp_sorted = sorted(grp, key=lambda x: _dispatch_sort_key(x.dispatch_date))
+
+            pocs_all: List[str] = []
+            vendors_all: List[str] = []
+            ids_all: List[str] = []
+            dates_all: List[str] = []
+
+            for r in grp_sorted:
+                ids_all.extend(_split_multi_values(r.legacy_id))
+                dates_all.extend(_split_multi_values(r.dispatch_date))
+                pocs_all.extend(_split_multi_values(r.pocs))
+                vendors_all.extend(_split_multi_values(r.vendor))
+
+            first = grp_sorted[0]
+            merged_none_rows.append(
+                CXOTableRow(
+                    tenant_id=first.tenant_id,
+                    legacy_id=", ".join(_dedupe_keep_order(ids_all)) or first.legacy_id,
+                    project=first.project,
+                    pocs=", ".join(_dedupe_keep_order(pocs_all)) or "None",
+                    vendor=", ".join(_dedupe_keep_order(vendors_all)) or "None",
+                    dispatch_date=", ".join(_dedupe_keep_order(dates_all)) or first.dispatch_date,
+                    major_movements="None",
+                    quality_issues="None",
+                )
+            )
+
+        merged_none_rows.sort(key=lambda r: _dispatch_sort_key(r.dispatch_date))
+        return normal_rows + merged_none_rows

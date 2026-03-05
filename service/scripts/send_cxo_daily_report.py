@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import logging
-import os
+import json
 import re
 import time
+from html import escape
 from datetime import datetime
 from typing import Dict, List, Tuple
 
 from app.config import load_settings
 from app.tools.sheets_tool import SheetsTool
-from app.tools.cxo_report_tool import CXOReportTool, Assembly
-from app.pipeline.nodes.generate_cxo_report import generate_cxo_report_html
+from app.tools.cxo_report_tool import CXOReportTool, Assembly, CXOTableRow
+from app.tools.llm_tool import LLMTool
 from app.integrations.email_client import EmailClient, EmailMessage
 
 logger = logging.getLogger("zai.cxo_report")
@@ -234,6 +235,319 @@ def _adaptive_batches(
     return batches
 
 
+def _is_none_text(v: object) -> bool:
+    t = str(v or "").strip().casefold()
+    return not t or t in {"none", "na", "n/a", "nil", "-", "--"}
+
+
+def _split_multiline_items(v: object) -> List[str]:
+    s = str(v or "")
+    out: List[str] = []
+    seen: set[str] = set()
+    for ln in s.splitlines():
+        x = ln.strip().lstrip("-").strip()
+        if not x:
+            continue
+        k = x.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    return out
+
+
+def _render_people_cell(v: str) -> str:
+    if _is_none_text(v):
+        return "None"
+    people = [escape(x) for x in re.split(r"[,;\n]+", v or "") if x.strip()]
+    if not people:
+        return "None"
+    return "<br/>".join(people)
+
+
+def _split_ids(v: str) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for tok in re.split(r"[,;\n]+", v or ""):
+        x = tok.strip()
+        if not x:
+            continue
+        k = x.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    return out
+
+
+def _format_dispatch_date(v: str) -> str:
+    def _one(s: str) -> str:
+        t = (s or "").strip()
+        if not t:
+            return ""
+        if "T" in t:
+            left = t.split("T", 1)[0].strip()
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", left):
+                return left
+        try:
+            dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+            return dt.date().isoformat()
+        except Exception:
+            return t
+
+    parts = [p.strip() for p in re.split(r"[,;\n]+", v or "") if p.strip()]
+    if not parts:
+        return ""
+    return ", ".join([_one(p) for p in parts])
+
+
+def _render_detail_cell(v: str) -> str:
+    if _is_none_text(v):
+        return "None"
+    items = [escape(x) for x in _split_multiline_items(v)]
+    if not items:
+        return "None"
+    if len(items) == 1:
+        return items[0]
+    return "<ul style='margin:0; padding-left:18px;'>" + "".join(f"<li>{x}</li>" for x in items) + "</ul>"
+
+
+def _build_table_report_html(
+    *,
+    rows: List[CXOTableRow],
+    start_ts: datetime,
+    now_ts: datetime,
+    days: int,
+) -> str:
+    header_html = (
+        f"<p><b>Scope:</b> Manufacturing assemblies={len(rows)} | "
+        f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')} | "
+        f"Time filter: created_at (not updated_at)</p>"
+    )
+
+    if not rows:
+        return header_html + "<p>No rows found.</p>"
+
+    table_rows: List[str] = []
+    for r in rows:
+        dispatch_disp = _format_dispatch_date(r.dispatch_date)
+        ids = _split_ids(r.legacy_id)
+        project_cell = escape(", ".join(ids) if ids else (r.legacy_id or "NA"))
+        table_rows.append(
+            "<tr>"
+            f"<td>{project_cell}</td>"
+            f"<td>{_render_people_cell(r.pocs)}</td>"
+            f"<td>{_render_people_cell(r.vendor)}</td>"
+            f"<td>{escape(dispatch_disp)}</td>"
+            f"<td>{_render_detail_cell(r.major_movements)}</td>"
+            f"<td>{_render_detail_cell(r.quality_issues)}</td>"
+            "</tr>"
+        )
+
+    table_html = (
+        "<table border='1' cellpadding='6' cellspacing='0' "
+        "style='border-collapse:collapse; width:100%; font-family:Arial,sans-serif; font-size:13px;'>"
+        "<thead>"
+        "<tr>"
+        "<th align='left'>Project</th>"
+        "<th align='left'>POCs</th>"
+        "<th align='left'>Vendor</th>"
+        "<th align='left'>Dispatch Date</th>"
+        "<th align='left'>Major Movements</th>"
+        "<th align='left'>Quality Issues Reported (if any)</th>"
+        "</tr>"
+        "</thead>"
+        "<tbody>"
+        + "".join(table_rows)
+        + "</tbody></table>"
+    )
+    return header_html + table_html
+
+
+def _extract_json_obj(text: str) -> Dict[str, object]:
+    s = (text or "").strip()
+    if not s:
+        return {}
+
+    if s.startswith("```"):
+        s = s.strip().strip("`").strip()
+        if s.lower().startswith("json"):
+            s = s[4:].strip()
+
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+
+    i = s.find("{")
+    j = s.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            obj = json.loads(s[i : j + 1])
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _chunk_rows(rows: List[CXOTableRow], batch_size: int) -> List[List[CXOTableRow]]:
+    n = int(batch_size or 20)
+    if n <= 0:
+        n = 20
+    return [rows[i : i + n] for i in range(0, len(rows), n)]
+
+
+def _llm_batch_prompt(
+    *,
+    assemblies: List[Dict[str, str]],
+    checkins_by_id: Dict[str, List[Dict[str, str]]],
+    updates_by_id: Dict[str, List[Dict[str, str]]],
+) -> str:
+    return (
+        "You are preparing CXO table cells for manufacturing updates.\n"
+        "For each assembly row, generate concise text for exactly two fields:\n"
+        "1) major_movements\n"
+        "2) quality_issues\n\n"
+        "Rules:\n"
+        "- Use only the provided checkins and project updates for that same row id.\n"
+        "- Keep language concise and business-readable.\n"
+        "- If no content exists for a field, return \"None\".\n"
+        "- Return strict JSON only, no markdown.\n\n"
+        "Output schema:\n"
+        "{\n"
+        "  \"rows\": [\n"
+        "    {\n"
+        "      \"tenant_id\": \"...\",\n"
+        "      \"legacy_id\": \"...\",\n"
+        "      \"major_movements\": \"...\",\n"
+        "      \"quality_issues\": \"...\"\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "ASSEMBLIES_JSON:\n"
+        + json.dumps(assemblies, ensure_ascii=False)
+        + "\n\nCHECKINS_BY_ID_JSON:\n"
+        + json.dumps(checkins_by_id, ensure_ascii=False)
+        + "\n\nUPDATES_BY_ID_JSON:\n"
+        + json.dumps(updates_by_id, ensure_ascii=False)
+    )
+
+
+def _apply_llm_major_quality(
+    *,
+    settings,
+    base_rows: List[CXOTableRow],
+    checkin_rows: List[Dict[str, object]],
+    update_rows: List[Dict[str, object]],
+    batch_size: int,
+) -> List[CXOTableRow]:
+    """
+    Run LLM in fixed-size batches (default 20 rows), then merge results back into rows.
+    """
+    if not base_rows:
+        return []
+
+    by_checkins: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+    by_updates: Dict[Tuple[str, str], List[Dict[str, object]]] = {}
+
+    for r in checkin_rows or []:
+        key = (str(r.get("tenant_id") or "").strip(), str(r.get("legacy_id") or "").strip())
+        if not key[0] or not key[1]:
+            continue
+        by_checkins.setdefault(key, []).append(r)
+
+    for r in update_rows or []:
+        key = (str(r.get("tenant_id") or "").strip(), str(r.get("legacy_id") or "").strip())
+        if not key[0] or not key[1]:
+            continue
+        by_updates.setdefault(key, []).append(r)
+
+    out_rows = list(base_rows)
+    idx_by_key: Dict[Tuple[str, str], int] = {(r.tenant_id, r.legacy_id): i for i, r in enumerate(out_rows)}
+
+    llm = LLMTool(settings)
+    batches = _chunk_rows(out_rows, batch_size=batch_size)
+    logger.info("LLM batch runs for CXO rows: batches=%d batch_size=%d", len(batches), int(batch_size or 20))
+
+    for bidx, batch in enumerate(batches, start=1):
+        batch_assemblies: List[Dict[str, str]] = []
+        checkins_by_id: Dict[str, List[Dict[str, str]]] = {}
+        updates_by_id: Dict[str, List[Dict[str, str]]] = {}
+
+        for r in batch:
+            key = (r.tenant_id, r.legacy_id)
+            id_key = f"{r.tenant_id}|{r.legacy_id}"
+            batch_assemblies.append(
+                {
+                    "tenant_id": r.tenant_id,
+                    "legacy_id": r.legacy_id,
+                    "project": r.project,
+                    "pocs": r.pocs,
+                    "vendor": r.vendor,
+                    "dispatch_date": r.dispatch_date,
+                }
+            )
+            checkins_by_id[id_key] = [
+                {
+                    "vector_type": str(x.get("vector_type") or ""),
+                    "summary_text": str(x.get("summary_text") or ""),
+                    "status": str(x.get("status") or ""),
+                }
+                for x in by_checkins.get(key, [])
+            ]
+            updates_by_id[id_key] = [
+                {
+                    "update_message": str(x.get("update_message") or ""),
+                }
+                for x in by_updates.get(key, [])
+            ]
+
+        prompt = _llm_batch_prompt(
+            assemblies=batch_assemblies,
+            checkins_by_id=checkins_by_id,
+            updates_by_id=updates_by_id,
+        )
+
+        logger.info("LLM batch [%d/%d] rows=%d", bidx, len(batches), len(batch))
+        try:
+            raw = llm.generate_text(prompt)
+            obj = _extract_json_obj(raw)
+            rows_obj = obj.get("rows") if isinstance(obj, dict) else None
+            if not isinstance(rows_obj, list):
+                logger.warning("LLM batch [%d/%d] invalid JSON payload; keeping deterministic base values", bidx, len(batches))
+                continue
+
+            for it in rows_obj:
+                if not isinstance(it, dict):
+                    continue
+                tid = str(it.get("tenant_id") or "").strip()
+                lid = str(it.get("legacy_id") or "").strip()
+                if not tid or not lid:
+                    continue
+                idx = idx_by_key.get((tid, lid))
+                if idx is None:
+                    continue
+                cur = out_rows[idx]
+                maj = str(it.get("major_movements") or "").strip() or cur.major_movements
+                qua = str(it.get("quality_issues") or "").strip() or cur.quality_issues
+                out_rows[idx] = CXOTableRow(
+                    tenant_id=cur.tenant_id,
+                    legacy_id=cur.legacy_id,
+                    project=cur.project,
+                    pocs=cur.pocs,
+                    vendor=cur.vendor,
+                    dispatch_date=cur.dispatch_date,
+                    major_movements=maj,
+                    quality_issues=qua,
+                )
+        except Exception as e:
+            logger.exception("LLM batch [%d/%d] failed: %s; using deterministic base values", bidx, len(batches), type(e).__name__)
+            continue
+
+    return out_rows
+
+
 def main() -> None:
     _setup_logging()
     t0 = time.time()
@@ -256,11 +570,6 @@ def main() -> None:
     smtp_user = (getattr(s, "smtp_user", "") or "").strip()
     smtp_password = (getattr(s, "smtp_password", "") or "").strip()
     smtp_use_starttls = bool(getattr(s, "smtp_use_starttls", True))
-
-    # Controls (env overrides allowed)
-    max_payload_bytes = int(os.getenv("CXO_REPORT_MAX_PAYLOAD_BYTES", str(getattr(s, "cxo_report_max_payload_bytes", 75000) or 75000)))
-    hard_max_batch = int(os.getenv("CXO_REPORT_HARD_MAX_BATCH", "20") or "20")
-    fail_open = (os.getenv("CXO_REPORT_FAIL_OPEN", str(int(bool(getattr(s, "cxo_report_fail_open", True))))) or "1").strip().lower() in ("1", "true", "yes", "y")
 
     sheets = SheetsTool(s)
     tool = CXOReportTool(s)
@@ -288,9 +597,6 @@ def main() -> None:
         key=lambda x: (x.project_name.casefold(), x.part_number.casefold(), x.legacy_id.casefold()),
     )
 
-    # map for name fallback
-    assemblies_by_key: Dict[Tuple[str, str], Assembly] = {(a.tenant_id, a.legacy_id): a for a in all_assemblies}
-
     # -------- GLOBAL fetch (single DB pass per table) --------
     logger.info("Fetching DB checkins/updates globally for %d assemblies...", len(all_assemblies))
     checkin_rows = tool.fetch_checkins_since_for_many(
@@ -304,144 +610,26 @@ def main() -> None:
         limit_per_key=400,
     )
 
-    # Convert DB rows -> prompt JSON (global lists)
-    checkins_json = tool.db_checkins_to_prompt_json_global(checkin_rows, assemblies_by_key)
-    updates_json = tool.db_updates_to_prompt_json_global(update_rows, assemblies_by_key)
-
-    logger.info("Global events: checkins=%d updates=%d", len(checkins_json), len(updates_json))
-
-    # -------- GLOBAL low visibility (computed BEFORE batching) --------
-    mode = (os.getenv("CXO_LOW_VISIBILITY_MODE", "window") or "window").strip().lower()
-    if mode not in ("window", "today"):
-        mode = "window"
-
-    low = tool.compute_low_visibility(
-        assemblies=all_assemblies,
-        checkins=checkins_json,
-        updates=updates_json,
-        mode="today" if mode == "today" else "window",
+    rows = tool.build_cxo_table_rows(
+        assemblies=assemblies_sorted,
+        checkin_rows=checkin_rows,
+        update_rows=update_rows,
     )
-    low_ul = tool.low_visibility_html(low)
-
-    # -------- Adaptive batching ONLY for LLM summarization --------
-    batches = _adaptive_batches(
-        assemblies_sorted=assemblies_sorted,
-        global_checkins=checkins_json,
-        global_updates=updates_json,
-        max_payload_bytes=max_payload_bytes,
-        hard_max_batch=hard_max_batch,
+    batch_size = 20
+    rows = _apply_llm_major_quality(
+        settings=s,
+        base_rows=rows,
+        checkin_rows=checkin_rows,
+        update_rows=update_rows,
+        batch_size=batch_size,
     )
-    logger.info("Adaptive batches=%d (max_payload_bytes=%d hard_max_batch=%d)", len(batches), max_payload_bytes, hard_max_batch)
-
-    major_li_batches: list[list[str]] = []
-    quality_li_batches: list[list[str]] = []
-    notes: list[str] = []
-
-    # Index global events by part_number AND part_name (prompt rule: match by pn primary and/or name)
-    by_key_checkins: Dict[str, List[Dict[str, str]]] = {}
-    by_key_updates: Dict[str, List[Dict[str, str]]] = {}
-
-    def _k_pn(x: str) -> str:
-        return "pn:" + (x or "").strip().casefold()
-
-    def _k_nm(x: str) -> str:
-        return "nm:" + (x or "").strip().casefold()
-
-    for c in checkins_json:
-        pn = (c.get("part_number") or "").strip()
-        nm = (c.get("part_name") or "").strip()
-        if pn:
-            by_key_checkins.setdefault(_k_pn(pn), []).append(c)
-        if nm:
-            by_key_checkins.setdefault(_k_nm(nm), []).append(c)
-
-    for u in updates_json:
-        pn = (u.get("part_number") or "").strip()
-        nm = (u.get("part_name") or "").strip()
-        if pn:
-            by_key_updates.setdefault(_k_pn(pn), []).append(u)
-        if nm:
-            by_key_updates.setdefault(_k_nm(nm), []).append(u)
-
-    for bidx, batch in enumerate(batches, start=1):
-        t1 = time.time()
-        keys = []
-        for a in batch:
-            pn = (a.part_number or "").strip()
-            nm = (a.part_name or "").strip()
-            if pn:
-                keys.append("pn:" + pn.casefold())
-            if nm:
-                keys.append("nm:" + nm.casefold())
-
-        seen = set()
-        batch_checkins: List[Dict[str, str]] = []
-        batch_updates: List[Dict[str, str]] = []
-
-        for k in keys:
-            for c in by_key_checkins.get(k, []):
-                cid = (c.get("checkin_id") or "") + "|" + (c.get("vector_type") or "") + "|" + (c.get("part_number") or "") + "|" + (c.get("description") or "")
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                batch_checkins.append(c)
-
-        for k in keys:
-            for u in by_key_updates.get(k, []):
-                uid = (u.get("part_number") or "") + "|" + (u.get("description") or "")
-                if uid in seen:
-                    continue
-                seen.add(uid)
-                batch_updates.append(u)
-
-        batch_assemblies_json = tool.assemblies_to_prompt_json(batch)
-
-        logger.info(
-            "Batch [%d/%d] assemblies=%d checkins=%d updates=%d | LLM call...",
-            bidx,
-            len(batches),
-            len(batch),
-            len(batch_checkins),
-            len(batch_updates),
-        )
-
-        try:
-            html = generate_cxo_report_html(
-                settings=s,
-                all_assemblies=batch_assemblies_json,
-                checkins=batch_checkins,
-                project_updates=batch_updates,
-            )
-            allowed_pns = [x.part_number for x in batch if (x.part_number or "").strip()]
-            html = _sanitize_html_against_foreign_parts(html=html, allowed_part_numbers=allowed_pns)
-
-            major_li_batches.append(_extract_section_ul_items(html, "Major Movements"))
-            quality_li_batches.append(_extract_section_ul_items(html, "Quality Issues Reported"))
-
-        except Exception as e:
-            logger.exception("Batch [%d/%d] LLM failed: %s", bidx, len(batches), type(e).__name__)
-            msg = f"<li>LLM batch {bidx}/{len(batches)} failed ({type(e).__name__}). Kept low-visibility computed from data.</li>"
-            notes.append(msg)
-            if not fail_open:
-                raise
-
-        logger.info("Batch [%d/%d] done in %.2fs", bidx, len(batches), time.time() - t1)
-
-    major_lis = _merge_li_items(sections=major_li_batches)
-    quality_lis = _merge_li_items(sections=quality_li_batches)
-
-    header_html = (
-        f"<p><b>Scope:</b> Manufacturing assemblies={len(all_assemblies)} | "
-        f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')} | "
-        f"Time filter: created_at (not updated_at)</p>"
-    )
-
-    final_html = _build_final_html(
-        header_html=header_html,
-        major_lis=major_lis,
-        quality_lis=quality_lis,
-        low_visibility_html_ul=low_ul,
-        batch_note_lis=notes,
+    rows = tool.merge_rows_when_both_none(rows)
+    logger.info("Table rows after merge=%d", len(rows))
+    final_html = _build_table_report_html(
+        rows=rows,
+        start_ts=start_ts,
+        now_ts=now_ts,
+        days=days,
     )
 
     # subject in IST

@@ -342,6 +342,7 @@ class Settings:
     smtp_use_starttls: bool
     cxo_report_max_payload_bytes: int
     cxo_report_fail_open: bool
+
 def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
     llm_api_key = _get_env("LLM_API_KEY", "")
