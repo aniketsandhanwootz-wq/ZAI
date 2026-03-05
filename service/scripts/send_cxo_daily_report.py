@@ -298,6 +298,47 @@ def _split_ids(v: str) -> List[str]:
     return out
 
 
+def _split_project_part_from_id(v: str) -> Tuple[str, str]:
+    s = (v or "").strip()
+    if not s:
+        return "", ""
+    if " - " in s:
+        left, right = s.split(" - ", 1)
+        return left.strip(), right.strip()
+    return s, ""
+
+
+def _render_merged_project_cell(*, ids: List[str], fallback_project: str) -> str:
+    project = (fallback_project or "").strip()
+    parts: List[str] = []
+    seen: set[str] = set()
+
+    for raw_id in ids or []:
+        p, part = _split_project_part_from_id(raw_id)
+        if not project and p:
+            project = p
+        token = (part or raw_id).strip()
+        if not token:
+            continue
+        k = token.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        parts.append(token)
+
+    project_disp = escape(project or "NA")
+    if not parts:
+        return f"<b>{project_disp}</b>"
+
+    bullets = "".join(f"<li>{escape(x)}</li>" for x in parts)
+    return (
+        f"<b>{project_disp}</b>"
+        "<ul style='margin:4px 0 0 16px; padding:0; list-style-type:disc;'>"
+        f"{bullets}"
+        "</ul>"
+    )
+
+
 def _format_dispatch_date(v: str) -> str:
     def _one(s: str) -> str:
         t = (s or "").strip()
@@ -354,8 +395,11 @@ def _build_table_report_html(
     for r in rows:
         dispatch_disp = _format_dispatch_date(r.dispatch_date)
         ids = _split_ids(r.legacy_id)
-        project_cell = escape(", ".join(ids) if ids else (r.legacy_id or "NA"))
         both_none = _is_none_text(r.major_movements) and _is_none_text(r.quality_issues)
+        if both_none:
+            project_cell = _render_merged_project_cell(ids=ids, fallback_project=r.project)
+        else:
+            project_cell = escape(", ".join(ids) if ids else (r.legacy_id or "NA"))
         table_rows.append(
             "<tr>"
             f"<td>{project_cell}</td>"
