@@ -5,6 +5,7 @@ spreadsheet:
   tabs:
     checkin: "CheckIN"
     project: "Project"
+    supplier_capmap: "Suppliers capmap"
     ccp: "CCP"
     conversation: "Conversation"
     dashboard_update: "Dashboard Updates"
@@ -26,11 +27,16 @@ columns:
     part_number: "Part number"
     assembly_drawing: "Assembly drawing"     # DO NOT ingest/embed
     internal_poc: "Internal POC"
+    vendor_poc: "Vendor POC"
     dispatch_date: "Dispatch date"
     company_row_id: "Company row id"
     legacy_id: "ID"
     status_assembly: "Status_assembly"
     ai_critcal_point: "ZAI Recommendations"
+
+  supplier_capmap:
+    supplier_id: "🔒 Supplier ID"
+    company_name: "Company_Name"
 
 
   ccp:
