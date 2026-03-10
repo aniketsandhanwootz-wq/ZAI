@@ -2,8 +2,8 @@ fastapi==0.135.1
 uvicorn[standard]==0.41.0
 
 # Google Sheets API
-google-api-python-client==2.191.0
-google-auth==2.48.0
+google-api-python-client==2.192.0
+google-auth==2.49.0
 
 # HTTP + utils
 requests==2.32.5
@@ -14,7 +14,7 @@ python-dotenv==1.2.2
 psycopg2-binary==2.9.11
 
 # Redis queue
-redis==7.2.1
+redis==7.3.0
 rq==2.7.0
 
 # LangChain + LangGraph (code mode)
@@ -24,7 +24,7 @@ langsmith
 
 
 pyyaml==6.0.3
-pypdf==6.7.5
+pypdf==6.8.0
 
 Pillow==12.1.1
 
