@@ -22,7 +22,7 @@ class WebhookPayload(BaseModel):
     conversation_id: Optional[str] = None
     ccp_id: Optional[str] = None
 
-    # Dashboard Updates unique identity (Row ID in the sheet)
+    # Dashboard Updates unique identity (canonical: Dashboard Update ID)
     dashboard_update_id: Optional[str] = None
 
     # Backward-compat aliases (if some webhook sender uses these keys)

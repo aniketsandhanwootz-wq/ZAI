@@ -106,6 +106,36 @@ def _drive_view_url(file_id: str) -> str:
         return ""
     return f"https://drive.google.com/uc?export=view&id={fid}"
 
+def _find_dashboard_update_row(
+    sheets: SheetsTool,
+    *,
+    dashboard_update_id: str,
+) -> Optional[Dict[str, Any]]:
+    did = _norm_value(dashboard_update_id)
+    if not did:
+        return None
+
+    try:
+        col_dash_id = sheets.map.col("dashboard_update", "dashboard_update_id")
+        k_dash_id = _key(col_dash_id)
+    except Exception:
+        k_dash_id = _key("Dashboard Update ID")
+
+    k_row_id = _key("Row ID")
+
+    rows = sheets.list_dashboard_updates()
+    for r in rows or []:
+        v = _norm_value((r or {}).get(k_dash_id, ""))
+        if v and v == did:
+            return r
+
+        # backward compatibility only
+        rv = _norm_value((r or {}).get(k_row_id, ""))
+        if rv and rv == did:
+            return r
+
+    return None
+
 
 def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
     sheets = SheetsTool(settings)
@@ -129,11 +159,17 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     conversation_id = payload.get("conversation_id")
     ccp_id = payload.get("ccp_id")
     legacy_id = payload.get("legacy_id")
+    dashboard_update_id = (
+        payload.get("dashboard_update_id")
+        or payload.get("dashboard_row_id")
+        or payload.get("row_id")
+    )
 
     state["checkin_id"] = checkin_id
     state["conversation_id"] = conversation_id
     state["ccp_id"] = ccp_id
     state["legacy_id"] = legacy_id
+    state["dashboard_update_id"] = dashboard_update_id
     state["event_type"] = payload.get("event_type", "")
 
     k_ci_project = _key(sheets.map.col("checkin", "project_name"))
@@ -146,13 +182,48 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
     if checkin_id:
         checkin_row = sheets.get_checkin_by_id(str(checkin_id))
     state["checkin_row"] = checkin_row
+    dashboard_update_row: Optional[Dict[str, Any]] = None
+    if dashboard_update_id:
+        try:
+            dashboard_update_row = _find_dashboard_update_row(
+                sheets,
+                dashboard_update_id=str(dashboard_update_id),
+            )
+        except Exception as e:
+            (state.get("logs") or []).append(f"Dashboard update lookup failed (non-fatal): {e}")
 
+    state["dashboard_update_row"] = dashboard_update_row
     project_name = _norm_value((checkin_row or {}).get(k_ci_project, ""))
     part_number = _norm_value((checkin_row or {}).get(k_ci_part, ""))
     legacy_id_from_checkin = _norm_value((checkin_row or {}).get(k_ci_legacy, ""))
 
+    if dashboard_update_row:
+        try:
+            k_du_project = _key(sheets.map.col("dashboard_update", "project_name"))
+            k_du_part = _key(sheets.map.col("dashboard_update", "part_number"))
+            k_du_legacy = _key(sheets.map.col("dashboard_update", "legacy_id"))
+            k_du_msg = _key(sheets.map.col("dashboard_update", "update_message"))
+        except Exception:
+            k_du_project = _key("Project Name")
+            k_du_part = _key("Part Number")
+            k_du_legacy = _key("ID")
+            k_du_msg = _key("Update Message")
+
+        if not project_name:
+            project_name = _norm_value((dashboard_update_row or {}).get(k_du_project, ""))
+        if not part_number:
+            part_number = _norm_value((dashboard_update_row or {}).get(k_du_part, ""))
+        if not legacy_id:
+            legacy_id = _norm_value((dashboard_update_row or {}).get(k_du_legacy, ""))
+
+        state["dashboard_update_message"] = _norm_value((dashboard_update_row or {}).get(k_du_msg, "")) or None
+    else:
+        state["dashboard_update_message"] = None
+
     if legacy_id_from_checkin:
         legacy_id = legacy_id_from_checkin
+        state["legacy_id"] = legacy_id
+    else:
         state["legacy_id"] = legacy_id
 
     state["project_name"] = project_name or None

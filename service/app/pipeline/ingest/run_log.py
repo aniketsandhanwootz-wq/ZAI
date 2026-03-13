@@ -68,6 +68,7 @@ class RunLog:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, (run_id,))
+            logger.info("RunLog.success run_id=%s", run_id)
         except Exception as e:
             logger.warning("RunLog.success failed (non-fatal). run_id=%s err=%s", run_id, e)
 
@@ -78,6 +79,7 @@ class RunLog:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(sql, (message[:2000], run_id))
+            logger.error("RunLog.error run_id=%s message=%s", run_id, message[:500])
         except Exception as e:
             # Never crash the worker just because run logging failed
             logger.warning("RunLog.error failed (non-fatal). run_id=%s err=%s", run_id, e)
