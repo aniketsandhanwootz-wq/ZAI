@@ -279,13 +279,15 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     dashboard_update_id=dashboard_update_id,
                 )
 
+                resolved_dashboard_update_id = str(out.get("dashboard_update_id") or dashboard_update_id).strip()
+
                 if out.get("skipped"):
                     (state.get("logs") or []).append(
-                        f"DASHBOARD_UPDATED skipped for dashboard_update_id={dashboard_update_id}: {out.get('reason', '')}"
+                        f"DASHBOARD_UPDATED skipped for dashboard_update_id={resolved_dashboard_update_id}: {out.get('reason', '')}"
                     )
                 else:
                     (state.get("logs") or []).append(
-                        f"DASHBOARD_UPDATED ingested dashboard_update_id={out.get('dashboard_update_id') or dashboard_update_id}"
+                        f"DASHBOARD_UPDATED ingested dashboard_update_id={resolved_dashboard_update_id}"
                     )
 
                 # Also refresh assembly checklist if project is already in MFG
@@ -302,7 +304,7 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "run_id": run_id,
                     "ok": True,
                     "event_type": event_type,
-                    "dashboard_update_id": dashboard_update_id,
+                    "dashboard_update_id": resolved_dashboard_update_id,
                     "result": out,
                     "skipped": bool(out.get("skipped")),
                     "assembly_todo_written": state.get("assembly_todo_written"),

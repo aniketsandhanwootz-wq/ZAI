@@ -25,18 +25,15 @@ def _extract_dashboard_update_id(
     k_row_id: Optional[str] = None,
 ) -> str:
     """
-    Preferred identity is Dashboard Update ID.
-    Fallback to Row ID only for backward compatibility with older rows/sheets.
+    Canonical stored identity is Dashboard Update ID only.
+
+    Row ID is NOT allowed to become stored/hash identity.
+    It may still be used separately for backward-compatible matching,
+    but this helper returns only the canonical Dashboard Update ID.
     """
     dash_id = _norm_value((row or {}).get(k_dash_id, ""))
     if dash_id:
         return dash_id
-
-    if k_row_id:
-        row_id = _norm_value((row or {}).get(k_row_id, ""))
-        if row_id:
-            return row_id
-
     return ""
 
 def _match_dashboard_row_identity(
@@ -54,9 +51,10 @@ def _match_dashboard_row_identity(
     Returns:
       (matched?, canonical_dashboard_update_id)
 
-    Canonical id preference:
-      1. Dashboard Update ID
-      2. Row ID (only if Dashboard Update ID is absent on that row)
+    Important:
+    - Row ID may be used only to FIND the row.
+    - Canonical stored identity must still be Dashboard Update ID.
+    - So if a row matches by Row ID but has no Dashboard Update ID, caller must skip.
     """
     incoming = _norm_value(incoming_id)
     if not incoming:
@@ -69,7 +67,7 @@ def _match_dashboard_row_identity(
         return True, raw_dash_id
 
     if raw_row_id and raw_row_id == incoming:
-        return True, raw_dash_id or raw_row_id
+        return True, raw_dash_id
 
     return False, ""
 def ingest_dashboard(settings: Settings, limit: int = 2000) -> Dict[str, Any]:
@@ -137,6 +135,7 @@ def ingest_dashboard(settings: Settings, limit: int = 2000) -> Dict[str, Any]:
     missing_tenant = 0
     embed_errors = 0
     missing_dashboard_update_id = 0
+    missing_canonical_dashboard_update_id = 0
 
     for r in rows:
         seen += 1
@@ -150,6 +149,7 @@ def ingest_dashboard(settings: Settings, limit: int = 2000) -> Dict[str, Any]:
 
         if not dashboard_update_id:
             missing_dashboard_update_id += 1
+            missing_canonical_dashboard_update_id += 1
             skipped += 1
             continue
 
@@ -206,10 +206,11 @@ def ingest_dashboard(settings: Settings, limit: int = 2000) -> Dict[str, Any]:
         "rows_embedded": embedded,
         "skipped": skipped,
         "missing_dashboard_update_id": missing_dashboard_update_id,
+        "missing_canonical_dashboard_update_id": missing_canonical_dashboard_update_id,
         "missing_legacy_id": missing_legacy,
         "missing_tenant": missing_tenant,
         "embed_errors": embed_errors,
-        "note": "Incremental ingestion via content_hash using Dashboard Update ID; safe to re-run anytime.",
+        "note": "Incremental ingestion via content_hash using canonical Dashboard Update ID only; safe to re-run anytime.",
     }
 
 
@@ -279,6 +280,7 @@ def ingest_dashboard_one(settings: Settings, *, legacy_id: str) -> Dict[str, Any
                 k_row_id=k_row_id,
             )
             if not dashboard_update_id:
+                # Do not allow Row ID to become canonical stored identity.
                 continue
 
             hit = r
@@ -400,8 +402,17 @@ def ingest_dashboard_one_by_dashboard_update_id(
         break
 
     if not hit:
-        return {"ok": True, "skipped": True, "reason": f"no dashboard update found for dashboard_update_id '{did}'"}
-
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": f"no dashboard update found for dashboard_update_id '{did}'",
+        }
+    if not resolved_id:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": f"matched dashboard row for '{did}' but canonical Dashboard Update ID is blank",
+        }
     legacy_id = _norm_value(hit.get(k_legacy, ""))
     msg = _norm_value(hit.get(k_msg, ""))
     dash_project = _norm_value(hit.get(k_proj, ""))
