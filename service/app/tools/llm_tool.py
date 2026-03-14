@@ -227,7 +227,7 @@ class LLMTool:
         fallback_csv = (getattr(self.settings, "llm_fallback_models", "") or "").strip()
         return _model_candidates(primary, fallback_csv)
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, *, temperature: float = 0.2) -> str:
         provider = self.settings.llm_provider
 
         if provider == "openai_compat":
@@ -246,7 +246,7 @@ class LLMTool:
                         {"role": "system", "content": "You are a helpful manufacturing quality assistant."},
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0.2,
+                    "temperature": float(temperature),
                 }
 
                 def _call() -> str:
@@ -304,7 +304,7 @@ class LLMTool:
                 payload = {
                     "systemInstruction": {"parts": [{"text": "You are a helpful manufacturing quality assistant."}]},
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.2},
+                    "generationConfig": {"temperature": float(temperature)},
                 }
 
                 def _call() -> str:
@@ -366,7 +366,7 @@ class LLMTool:
         Returns parsed JSON dict ({} if parse fails).
         """
         if self.settings.llm_provider != "gemini":
-            return _extract_json(self.generate_text(prompt))
+            return _extract_json(self.generate_text(prompt, temperature=temperature))
 
         base = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
         models = self._candidate_models(default_model="gemini-2.5-flash")

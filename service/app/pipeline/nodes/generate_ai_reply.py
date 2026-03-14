@@ -6,6 +6,8 @@ from pathlib import Path
 from ...config import Settings
 from ...tools.llm_tool import LLMTool
 
+CHECKIN_REPLY_TEMPERATURE = 0.4
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
@@ -161,10 +163,10 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
     llm = LLMTool(settings)
 
     try:
-        out = llm.generate_json_with_images(prompt=prompt, images=images, temperature=0.0)
+        out = llm.generate_json_with_images(prompt=prompt, images=images, temperature=CHECKIN_REPLY_TEMPERATURE)
     except Exception as e:
         state.setdefault("logs", []).append(f"LLM JSON+images failed: {e}")
-        fallback = llm.generate_text(prompt).strip()
+        fallback = llm.generate_text(prompt, temperature=CHECKIN_REPLY_TEMPERATURE).strip()
         state["ai_reply"] = _strip_evidence_blocks(fallback)
         state["defects_by_image"] = []
         state["reply_citations"] = []
@@ -178,7 +180,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
     else:
         technical = str(ta or "").strip()
     if not technical:
-        technical = _strip_evidence_blocks(llm.generate_text(prompt).strip())
+        technical = _strip_evidence_blocks(llm.generate_text(prompt, temperature=CHECKIN_REPLY_TEMPERATURE).strip())
 
     # Optional fields (won't break existing flows)
     citations: List[Dict[str, Any]] = []

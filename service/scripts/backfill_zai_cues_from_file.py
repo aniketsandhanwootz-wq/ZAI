@@ -25,6 +25,8 @@ from service.app.tools.vector_tool import VectorTool
 from service.app.pipeline.nodes.rerank_context import rerank_context
 from service.app.integrations.appsheet_client import AppSheetClient
 
+ZAI_CUES_TEMPERATURE = 0.4
+
 # ----------------------------
 # Repo + env
 # ----------------------------
@@ -196,11 +198,17 @@ def _read_legacy_ids(path: Path) -> List[str]:
             seen.add(k)
     return out
 
-def _llm_generate_with_retries(llm: LLMTool, prompt: str, *, max_attempts: int = 3) -> str:
+def _llm_generate_with_retries(
+    llm: LLMTool,
+    prompt: str,
+    *,
+    temperature: float = ZAI_CUES_TEMPERATURE,
+    max_attempts: int = 3,
+) -> str:
     last_err: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         try:
-            return llm.generate_text(prompt)
+            return llm.generate_text(prompt, temperature=temperature)
         except Exception as e:
             last_err = e
             if attempt >= max_attempts:

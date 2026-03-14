@@ -17,6 +17,8 @@ from ...tools.vector_tool import VectorTool
 from .rerank_context import rerank_context
 from ...integrations.appsheet_client import AppSheetClient
 
+ZAI_CUES_TEMPERATURE = 0.4
+
 
 # -------------------------
 # Prompt loader (ONLY zai_cues_10.md)
@@ -236,7 +238,7 @@ def _generate_context_notes_for_cues(
         + "\n\n(Important: Output only selected blocks in the specified format.)\n"
     )
 
-    raw = llm.generate_text(prompt)
+    raw = llm.generate_text(prompt, temperature=ZAI_CUES_TEMPERATURE)
     text = str(raw or "").strip()
     if not text:
         return {}
@@ -329,7 +331,7 @@ def _generate_10_cues_from_context(
         .replace("{attachment_context}", attachment_context or "N/A")
     )
 
-    raw = llm.generate_text(prompt)
+    raw = llm.generate_text(prompt, temperature=ZAI_CUES_TEMPERATURE)
 
     cues: List[str] = []
     obj = _parse_json_loose(raw)
