@@ -1,143 +1,223 @@
-# ZAI (Wootz.Work) - Manufacturing Intelligence Service
+# ZAI
 
-ZAI is a FastAPI + RQ service that ingests manufacturing data from Google Sheets, Glide, and Drive, builds retrieval memory in Postgres/pgvector, generates AI outputs, and writes actions back to AppSheet/Teams/n8n/email flows.
+Operational AI runtime for Wootz manufacturing workflows.
 
-This README is the source of truth for:
-- Runtime architecture and processing flow
-- Webhook contracts and operational payloads
-- Environment variable setup by feature
-- Local run and deployment runbooks
-- Troubleshooting and security practices
+ZAI ingests manufacturing updates from Google Sheets, Glide, Drive, and AppSheet, builds retrieval memory in Postgres/pgvector, runs event-driven AI workflows, and pushes results back into operational systems such as AppSheet, Teams, n8n, and SMTP.
 
-## Table Of Contents
-1. [System Overview](#system-overview)
-2. [Repository Structure](#repository-structure)
-3. [Runtime Architecture](#runtime-architecture)
-4. [Event Model And Pipeline Behavior](#event-model-and-pipeline-behavior)
-5. [External Contracts](#external-contracts)
-6. [Storage Model](#storage-model)
-7. [Configuration](#configuration)
-8. [Local Development](#local-development)
-9. [Operational Scripts](#operational-scripts)
-10. [Deployment](#deployment)
-11. [Observability](#observability)
-12. [Troubleshooting](#troubleshooting)
-13. [Security Practices](#security-practices)
-14. [Known Limitations](#known-limitations)
-15. [Maintenance Checklist](#maintenance-checklist)
+It is built for three things:
 
-## System Overview
-ZAI does four core jobs:
+- reliable ingestion from messy operational systems
+- retrieval-backed AI generation on live manufacturing context
+- deterministic writeback and operator runbooks
 
-1. Ingest data
-- Sheets tabs (CheckIN, Project, Conversation, CCP, Dashboard Updates, Users database, Suppliers capmap)
-- Glide tables (company, raw_material, processes, boughtouts, optionally project)
-- Drive/File attachments referenced in check-ins
+## At A Glance
 
-2. Build retrieval memory
-- Writes vectorized memory to Postgres `pgvector` tables
-- Persists artifacts and file analysis metadata for idempotency and audit
+| Layer | Stack | Responsibility |
+| --- | --- | --- |
+| API | FastAPI | Webhooks, admin endpoints, health, request lifecycle |
+| Queue | Redis + RQ | Background execution and replay-safe job handling |
+| Pipeline | `service/app/pipeline/*` | Event graph, ingest, retrieval, generation, writeback |
+| Memory | Postgres + pgvector | Incident, dashboard, CCP, Glide KB, artifacts, runs |
+| Integrations | Sheets, Drive, Glide, AppSheet, Teams, n8n, SMTP | External data sources and sinks |
 
-3. Generate operational outputs
-- Check-in AI reply + criticality signal
-- Assembly checklist/cues flows
-- CXO daily manufacturing email report
+## System Map
 
-4. Write back actions
-- AppSheet Conversation row writes
-- Teams webhook posts
-- n8n webhook trigger for critical check-ins
+```text
+Google Sheets / Glide / Drive / AppSheet
+                |
+                v
+        FastAPI webhook surface
+                |
+                v
+          Event graph (RQ jobs)
+                |
+    +-----------+-----------+
+    |                       |
+    v                       v
+Ingestion + artifacts   AI generation
+    |                       |
+    +-----------+-----------+
+                |
+                v
+       Postgres + pgvector memory
+                |
+    +-----------+-----------+-----------+
+    |           |           |           |
+    v           v           v           v
+AppSheet      Teams        n8n        SMTP
+```
 
-## Repository Structure
-High-value paths:
+## What ZAI Does
 
-- `service/app/main.py`
-  FastAPI app, lifecycle, health, admin endpoints, router mounting.
+### 1. Ingest operational data
 
-- `service/app/pipeline/graph.py`
-  Core orchestrator for webhook events.
+- Check-ins, conversations, dashboard updates, CCP rows, projects, and Glide knowledge tables
+- File and image references from Drive-backed workflows
+- Incremental and bulk backfill paths for recovery
 
-- `service/app/pipeline/nodes/`
-  Modular pipeline nodes: load data, analyze media/files, retrieve/rerank context, generate reply, writeback.
+### 2. Build retrieval memory
 
-- `service/app/tools/`
-  DB, vectors, Sheets, Drive, LLM, embedding, CXO report tooling.
+- Incident memory from check-ins and conversations
+- Dashboard movement memory
+- CCP memory
+- Company and Glide KB vectors
+- Attachment and artifact metadata for audit and idempotency
 
-- `service/app/integrations/`
-  AppSheet, Glide, Teams, SMTP integration clients.
+### 3. Generate operator-facing outputs
 
-- `service/scripts/`
-  Operational scripts (reconcile, backfills, CXO email run).
+- AI replies for check-ins
+- Critical escalation signals
+- Assembly todo / cue refresh
+- CXO daily manufacturing report email
 
-- `packages/contracts/`
-  Mapping contracts (`sheets_mapping.yaml`, `zai_cues_log_mapping.yaml`).
+### 4. Write back actions
 
-- `packages/prompts/`
-  Prompt templates (`checkin_reply.md`, `zai_cues_10.md`, `cxo_report.md`, etc.).
+- AppSheet conversation updates
+- Teams notifications
+- n8n webhook for critical flows
+- SMTP report delivery
 
-- `packages/db/migrations/`
-  SQL schema and indexes.
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11
+- Postgres with `pgvector`
+- Redis
+- Google Sheets service-account credential
+- Google Drive OAuth token if Drive-backed files are needed
+
+### Install
+
+```bash
+cd /Users/aniketsandhan/Desktop/ZAI
+python3 -m venv service/.venv
+source service/.venv/bin/activate
+pip install -r service/requirements.txt
+```
+
+### Minimum local setup
+
+Create `service/.env` and populate the required variables:
+
+- `DATABASE_URL`
+- `REDIS_URL`
+- `GOOGLE_SHEET_ID`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE`
+- `WEBHOOK_SECRET`
+- `LLM_PROVIDER`
+- `LLM_API_KEY`
+- `LLM_MODEL`
+- `EMBEDDING_PROVIDER`
+- `EMBEDDING_API_KEY`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_DIMS`
+
+### Run the API
+
+From `service/`:
+
+```bash
+cd /Users/aniketsandhan/Desktop/ZAI/service
+source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+Health check:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Operational notes:
+
+- `app.main` auto-loads `service/.env`
+- worker auto-starts when `RUN_CONSUMER=1`
+- migrations auto-run when `RUN_MIGRATIONS=1`
+
+## Credential Model
+
+This repo uses two different Google auth models. Mixing them up is the fastest way to break local runs.
+
+| Surface | Env var | Expected credential type |
+| --- | --- | --- |
+| Google Sheets | `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE` | Real service-account JSON |
+| Google Drive | `DRIVE_TOKEN_JSON` | OAuth token JSON string or path |
+
+Important:
+
+- `GOOGLE_SERVICE_ACCOUNT_FILE` must point to a service-account key, not a user OAuth token file
+- `DRIVE_TOKEN_JSON` is separate and is allowed to be a user OAuth token
+
+## Repository Map
+
+| Path | Purpose |
+| --- | --- |
+| `service/app/main.py` | FastAPI app, startup lifecycle, health, admin endpoints |
+| `service/app/pipeline/graph.py` | Core event orchestrator |
+| `service/app/pipeline/nodes/` | Pipeline nodes for loading, retrieval, generation, media, writeback |
+| `service/app/pipeline/ingest/` | Bulk and incremental ingest logic |
+| `service/app/tools/` | Sheets, vector, embedding, drive, LLM, CXO report helpers |
+| `service/app/integrations/` | AppSheet, Glide, Teams, SMTP clients |
+| `service/scripts/` | Operator scripts, backfills, reconciliation, report execution |
+| `packages/contracts/` | Column mapping contracts |
+| `packages/prompts/` | Prompt templates |
+| `packages/db/migrations/` | SQL schema and index migrations |
 
 ## Runtime Architecture
-At runtime, the service has these moving parts:
 
-- API Process
-  - FastAPI receives webhooks/admin calls.
-  - Enqueues jobs to Redis via RQ.
+### API process
 
-- Embedded Worker Process
-  - Spawned by app lifecycle when `RUN_CONSUMER=1`.
-  - Runs `rq worker` in a separate process monitored by `service/app/consumer.py`.
+- receives webhook and admin traffic
+- validates payloads and secrets
+- enqueues work to Redis/RQ
 
-- Postgres
-  - Stores vectors, run logs, artifacts, and company/cache data.
+### Embedded worker process
 
-- Redis
-  - Queue transport for background processing.
+- spawned by app lifecycle when `RUN_CONSUMER=1`
+- managed by `service/app/consumer.py`
+- executes event graph jobs in a separate process
 
-- External Integrations
-  - Google Sheets API
-  - Google Drive API (OAuth token based)
-  - Glide Tables API
-  - AppSheet API
-  - Teams webhook / Power Automate webhook
-  - n8n webhook
-  - SMTP (CXO report)
+### Postgres
 
-## Event Model And Pipeline Behavior
-Event payload schema is defined in `service/app/schemas/webhook.py`.
-Supported event types:
-- `CHECKIN_CREATED`
-- `CHECKIN_UPDATED`
-- `CONVERSATION_ADDED`
-- `CCP_UPDATED`
-- `DASHBOARD_UPDATED`
-- `PROJECT_UPDATED`
-- `MANUAL_TRIGGER`
+Stores:
 
-### Main behavior by event
+- vectors and retrieval memory
+- AI run tracking
+- artifact metadata
+- cached company profiles
 
-1. `CHECKIN_CREATED`
-- Runs full pipeline including AI reply generation and writeback.
-- May post to Teams.
-- May call n8n if critical.
+### Redis
 
-2. `CHECKIN_UPDATED` and `CONVERSATION_ADDED`
-- Ingest-focused by default.
-- No human-facing reply writeback unless explicitly forced in meta logic.
+- RQ transport
+- queue buffering between webhooks and processing
 
-3. `CCP_UPDATED`
-- Incremental CCP ingest path.
-- Also refreshes assembly todo generation.
+## Event Model
 
-4. `DASHBOARD_UPDATED`
-- Ingest by row id if available, else legacy-id fallback.
-- Also refreshes assembly todo generation.
+Payload schema lives in `service/app/schemas/webhook.py`.
 
-5. `PROJECT_UPDATED`
-- Primarily assembly todo refresh path.
+### Supported events
 
-### High-level node order for `CHECKIN_CREATED`
+| Event | Primary identity | Default behavior |
+| --- | --- | --- |
+| `CHECKIN_CREATED` | `checkin_id` | Full pipeline, reply generation, writeback, optional Teams/n8n |
+| `CHECKIN_UPDATED` | `checkin_id` | Ingest-focused refresh |
+| `CONVERSATION_ADDED` | `conversation_id` | Incremental ingest of thread context |
+| `CCP_UPDATED` | `ccp_id` | Incremental CCP ingest and assembly todo refresh |
+| `DASHBOARD_UPDATED` | `dashboard_update_id` | Exact-row dashboard ingest and assembly todo refresh |
+| `PROJECT_UPDATED` | `legacy_id` | Project/assembly refresh path |
+| `MANUAL_TRIGGER` | operator supplied | Manual execution entry point |
+
+### Dashboard identity model
+
+`DASHBOARD_UPDATED` is wired around canonical `Dashboard Update ID`.
+
+- canonical stored identity: `Dashboard Update ID`
+- backward-compatible lookup aliases: `dashboard_row_id`, `row_id`
+- active graph path does not fall back to assembly-level `legacy_id`
+
+### High-level `CHECKIN_CREATED` flow
+
 1. `load_sheet_data`
 2. `generate_assembly_todo`
 3. `build_thread_snapshot`
@@ -150,14 +230,15 @@ Supported event types:
 10. `upsert_vectors`
 11. `writeback`
 
-## External Contracts
+## External Interfaces
 
-### Sheets webhook endpoint
+### Sheets webhook
+
 - `POST /webhooks/sheets`
-- Header required: `x-sheets-secret: <WEBHOOK_SECRET>`
-- Body: `WebhookPayload` (see schema above)
+- required header: `x-sheets-secret: <WEBHOOK_SECRET>`
+- body: `WebhookPayload`
 
-Minimal example:
+Example:
 
 ```json
 {
@@ -167,15 +248,15 @@ Minimal example:
 }
 ```
 
-### Glide webhook endpoint
-- `POST /webhooks/glide`
-- Secret accepted as one of:
-  - `x-webhook-secret` header
-  - `Authorization: Bearer <secret>`
-  - `?secret=<secret>` query
-- Uses same `WEBHOOK_SECRET`
+### Glide webhook
 
-Minimal example:
+- `POST /webhooks/glide`
+- accepted secrets:
+  - `x-webhook-secret`
+  - `Authorization: Bearer <secret>`
+  - `?secret=<secret>`
+
+Example:
 
 ```json
 {
@@ -186,115 +267,82 @@ Minimal example:
 }
 ```
 
-### n8n webhook payload (critical checkin path)
-This is sent from `writeback.py` only when:
-- event is `CHECKIN_CREATED`
-- `is_critical == true`
-- `N8N_WHATSAPP_WEBHOOK_URL` is configured
-
-Current payload shape:
-
-```json
-{
-  "type": "checkin_created",
-  "tenant_id": "string",
-  "checkin_id": "string",
-  "checkin_url": "string",
-  "project_name": "string",
-  "company_name": "string",
-  "ai_reply": "string",
-  "part_number": "string",
-  "status": "string",
-  "checkin_text": "string",
-  "created_by": "string",
-  "created_by_phone": "string",
-  "internal_poc_phones": ["string", "string"],
-  "annotated_images": ["url1", "url2"],
-  "checkin_images": ["url1", "url2"],
-  "item_id": "string"
-}
-```
-
-Note:
-- `internal_poc_phones` is a list resolved from `Project.Internal POC` emails using `Users database` contact lookup.
-
 ### Admin endpoints
-- `GET /health`
-- `POST /admin/trigger`
-- `POST /admin/migrate`
-- `POST /admin/ingest`
 
-These are operational endpoints and should be protected at network/auth layer in production.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Runtime/provider health |
+| `POST /admin/trigger` | Manual event execution |
+| `POST /admin/migrate` | Run SQL migrations |
+| `POST /admin/ingest` | Bulk ingest/backfill entry point |
+
+These endpoints are operational surfaces and should be protected outside the app.
 
 ## Storage Model
-Primary DB entities include:
 
-- Run tracking
-  - `ai_runs`
+### Primary tables
 
-- Retrieval memory
-  - `incident_vectors`
-  - `ccp_vectors`
-  - `dashboard_vectors`
-  - `glide_kb_items`
-  - `glide_kb_vectors`
-  - `company_vectors`
+| Category | Tables |
+| --- | --- |
+| Run tracking | `ai_runs` |
+| Retrieval memory | `incident_vectors`, `ccp_vectors`, `dashboard_vectors`, `glide_kb_vectors`, `company_vectors` |
+| Glide KB base data | `glide_kb_items` |
+| Artifacts | `artifacts`, `checkin_file_artifacts` |
+| Cache/profile | `company_profiles` |
 
-- Artifacts and attachment analysis
-  - `artifacts`
-  - `checkin_file_artifacts`
+Migrations live in `packages/db/migrations/`.
 
-- Company profile cache
-  - `company_profiles`
-
-Migrations are in `packages/db/migrations/`.
-
-Startup migrator currently executes `001` to `010` from `service/app/pipeline/ingest/migrate.py`.
-If you need migration `011`, apply it manually or extend `migrate.py` list.
+Current startup migrator runs SQL files `001` to `010` from `service/app/pipeline/ingest/migrate.py`.
 
 ## Configuration
-All config is env-driven through `service/app/config.py`.
 
-### Boot-critical variables
-Service startup requires these:
-- `DATABASE_URL`
-- `REDIS_URL`
-- `GOOGLE_SHEET_ID`
-- `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE`
-- `WEBHOOK_SECRET` (or fallback `APPSHEET_WEBHOOK_SECRET`)
+All runtime configuration is loaded through `service/app/config.py`.
 
-### Core AI variables
+### Boot-critical
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | Postgres connection |
+| `REDIS_URL` | Yes | Queue backend |
+| `GOOGLE_SHEET_ID` | Yes | Primary spreadsheet |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE` | Yes | Sheets auth |
+| `WEBHOOK_SECRET` or `APPSHEET_WEBHOOK_SECRET` | Yes | Webhook auth |
+
+### Core AI
+
 - `LLM_PROVIDER`
 - `LLM_API_KEY`
 - `LLM_MODEL`
-- `LLM_FALLBACK_MODELS` (optional CSV)
-
+- `LLM_FALLBACK_MODELS`
 - `EMBEDDING_PROVIDER`
 - `EMBEDDING_API_KEY`
 - `EMBEDDING_MODEL`
 - `EMBEDDING_DIMS`
 
-### Runtime toggles
-- `RUN_CONSUMER` (`1/0`)
-- `CONSUMER_QUEUES` (default `default`)
-- `RUN_MIGRATIONS` (`1/0`)
+### Runtime flags
+
+- `RUN_CONSUMER`
+- `CONSUMER_QUEUES`
+- `RUN_MIGRATIONS`
 
 ### Sheets and mapping
-- `SHEETS_MAPPING_PATH` (default `packages/contracts/sheets_mapping.yaml`)
-- `GOOGLE_SHEET_ADDITIONAL_PHOTOS_ID` (optional)
-- `ADDITIONAL_PHOTOS_TAB_NAME` (optional)
+
+- `SHEETS_MAPPING_PATH`
+- `GOOGLE_SHEET_ADDITIONAL_PHOTOS_ID`
+- `ADDITIONAL_PHOTOS_TAB_NAME`
 
 ### Drive and vision
+
 - `GOOGLE_DRIVE_ROOT_FOLDER_ID`
 - `GOOGLE_DRIVE_ANNOTATED_FOLDER_ID`
 - `DRIVE_PREFIX_MAP_JSON`
-- `DRIVE_TOKEN_JSON` (OAuth token JSON string or path)
-
+- `DRIVE_TOKEN_JSON`
 - `VISION_PROVIDER`
 - `VISION_API_KEY`
 - `VISION_MODEL`
 
 ### AppSheet
+
 - `APPSHEET_BASE_URL`
 - `APPSHEET_APP_ID`
 - `APPSHEET_ACCESS_KEY`
@@ -302,24 +350,22 @@ Service startup requires these:
 - `APPSHEET_CONVERSATION_TABLE`
 - `APPSHEET_CONVERSATION_KEY_COL`
 - `APPSHEET_CONVERSATION_CRITICAL_COL`
-- `APPSHEET_CUES_COL_*` overrides (optional)
+- `APPSHEET_CUES_COL_*`
 
 ### Glide
-Either set individual vars:
-- `GLIDE_API_KEY`
-- `GLIDE_APP_ID`
-- `GLIDE_BASE_URL`
-- `GLIDE_COMPANY_TABLE`
-- `GLIDE_RAW_MATERIAL_TABLE`
-- `GLIDE_PROCESSES_TABLE`
-- `GLIDE_BOUGHTOUTS_TABLE`
-- `GLIDE_PROJECT_TABLE` (optional)
-- related `GLIDE_*_COLUMN` overrides
 
-Or set:
-- `GLIDE_CONFIG_JSON` (object with tables/columns)
+Either configure explicit Glide env vars or use `GLIDE_CONFIG_JSON`.
 
-### CXO report (email)
+Relevant Glide surfaces:
+
+- company
+- raw material
+- processes
+- boughtouts
+- optional project table
+
+### CXO report
+
 - `CXO_REPORT_ENABLED`
 - `CXO_REPORT_TO_EMAIL`
 - `CXO_REPORT_FROM_EMAIL`
@@ -333,58 +379,17 @@ Or set:
 - `CXO_REPORT_MAX_PAYLOAD_BYTES`
 - `CXO_REPORT_FAIL_OPEN`
 
-### Tracing (optional)
+### Tracing
+
 - `LANGSMITH_TRACING` or `LANGCHAIN_TRACING_V2`
 - `LANGSMITH_API_KEY` or `LANGCHAIN_API_KEY`
-- `LANGSMITH_PROJECT`/`LANGCHAIN_PROJECT`
+- `LANGSMITH_PROJECT` or `LANGCHAIN_PROJECT`
 
-## Local Development
+## Operator Runbooks
 
-### Prerequisites
-- Python 3.11 recommended (matches Docker images)
-- Postgres with `pgvector`
-- Redis
+### Glide reconcile
 
-### Setup
-
-```bash
-cd /Users/aniketsandhan/Desktop/ZAI
-python3 -m venv service/.venv
-source service/.venv/bin/activate
-pip install -r service/requirements.txt
-```
-
-Create and populate `service/.env` with required variables.
-
-### Run API (from `service/`)
-
-```bash
-cd service
-source .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
-```
-
-Notes:
-- `app.main` auto-loads `service/.env` at startup.
-- Worker is auto-spawned when `RUN_CONSUMER=1`.
-
-### Run API (from repo root)
-
-```bash
-source service/.venv/bin/activate
-uvicorn service.app.main:app --reload --port 8000
-```
-
-### Health check
-
-```bash
-curl http://localhost:8000/health
-```
-
-## Operational Scripts
-
-### 1) Glide reconcile
-Purpose: sync Glide tables into DB/vector memory.
+Purpose: sync Glide knowledge tables into DB/vector memory.
 
 ```bash
 cd /Users/aniketsandhan/Desktop/ZAI
@@ -393,11 +398,13 @@ python -m service.scripts.glide_reconcile --tables company,raw_material,processe
 ```
 
 Useful flags:
-- `--limit N`
+
+- `--limit`
 - `--dry-run`
 
-### 2) Backfill CHECKIN_CREATED
-Purpose: replay checkin-created flow for IDs from a file.
+### Backfill `CHECKIN_CREATED`
+
+Purpose: replay missed check-in created flows for a list of IDs.
 
 ```bash
 cd /Users/aniketsandhan/Desktop/ZAI
@@ -406,11 +413,13 @@ python -m service.scripts.backfill_checkin_created --file missed_ids.txt --mode 
 ```
 
 Useful flags:
+
 - `--dry-run`
 - `--sleep`
 - `--limit`
+- `--mode enqueue`
 
-### 3) Backfill ZAI cues from file
+### Backfill ZAI cues
 
 ```bash
 cd /Users/aniketsandhan/Desktop/ZAI
@@ -419,120 +428,157 @@ python -m service.scripts.backfill_zai_cues_from_file --file service/scripts/leg
 ```
 
 Useful flags:
+
 - `--dry-run`
 - `--force`
 - `--allow-non-mfg`
 - `--limit`
 
-### 4) Send CXO report manually
-Run from `service/` because module path is `app.*`:
+### Send CXO report manually
+
+This command attempts a real SMTP send. There is no dry-run flag in the current script.
 
 ```bash
 cd /Users/aniketsandhan/Desktop/ZAI/service
 source .venv/bin/activate
-set -a
-source .env
-set +a
-python -m app.scripts.send_cxo_daily_report
+PYTHONPATH=. .venv/bin/python -c 'from dotenv import load_dotenv; load_dotenv(".env", override=True); import runpy; runpy.run_path("scripts/send_cxo_daily_report.py", run_name="__main__")'
 ```
 
-Behavior summary:
-- Reads assemblies from Sheets (Project tab, mfg-only)
-- Fetches checkins/updates from DB
-- Builds rows, enriches major/quality via LLM in batches
-- Sends HTML table email via SMTP
-- Does not write back to Sheets in this flow
+What it does:
+
+- reads assemblies from Sheets
+- fetches recent DB updates
+- builds major movement and quality summaries
+- runs LLM batch enrichment
+- sends HTML email via SMTP
+
+### Backfill dashboard updates by `Dashboard Update ID`
+
+Purpose: backfill canonical dashboard vectors for specific dashboard update IDs.
+
+```bash
+cd /Users/aniketsandhan/Desktop/ZAI
+source service/.venv/bin/activate
+python service/scripts/backfill_dashboard_updates_by_id.py --ids-file service/scripts/dashboard_update_ids.txt --dry-run
+python service/scripts/backfill_dashboard_updates_by_id.py --ids-file service/scripts/dashboard_update_ids.txt
+```
+
+Behavior:
+
+- reads rows from the `Dashboard Updates` sheet using canonical `Dashboard Update ID`
+- validates `legacy_id`, `update_message`, tenant resolution, and source timestamp
+- `--dry-run` performs validation and embedding calls without Postgres writes
+- live run writes only to Postgres, not back to Sheets
 
 ## Deployment
 
 ### Web service image
-`service/Dockerfile`:
-- Installs `service/requirements.txt`
-- Copies `service/app`, `service/scripts`, `packages`
-- Runs `uvicorn app.main:app`
+
+`service/Dockerfile`
+
+- installs `service/requirements.txt`
+- copies `service/app`, `service/scripts`, `packages`
+- runs `uvicorn app.main:app`
 
 ### CXO cron image
-`service/Dockerfile.cxo_cron`:
-- Same base install
-- Runs one-shot:
-  - `python -m app.scripts.send_cxo_daily_report`
 
-### Suggested deployment split
-- Web service: API + embedded worker (`RUN_CONSUMER=1`)
-- Cron service: CXO report schedule
+`service/Dockerfile.cxo_cron`
+
+- same dependency base
+- runs one-shot `python -m app.scripts.send_cxo_daily_report`
+
+### Recommended split
+
+- web service: API + embedded worker with `RUN_CONSUMER=1`
+- cron service: CXO report schedule
 
 ## Observability
 
-### Logging
-- Contextual logs include request id and run id (`service/app/logctx.py`).
-- Run lifecycle tracked in `ai_runs` (`RUNNING/SUCCESS/ERROR`).
+### Runtime visibility
 
-### Run IDs and idempotency
-- `graph.py` computes per-event primary ids.
-- Idempotency supports scoped replay modes.
+- contextual logs include request id and run id
+- `ai_runs` tracks `RUNNING`, `SUCCESS`, and `ERROR`
+- `/health` exposes provider/model/runtime flags
 
-### Health
-- `/health` returns provider/model/runtime flags.
+### Idempotency
+
+- event graph computes event-specific primary identities
+- replay flows can bypass idempotency explicitly when needed
 
 ## Troubleshooting
 
 ### `ModuleNotFoundError: No module named 'app'`
-Cause: script run from wrong working directory for `app.*` imports.
+
+Cause: running an `app.*` script from the wrong working directory.
+
 Fix:
+
 - `cd service`
-- run `python -m app.scripts.<script_name>`
+- run the script from there, or use the documented wrapper command
 
-### Drive token error `invalid_grant: Token has been expired or revoked`
-Cause: `DRIVE_TOKEN_JSON` refresh token invalid/revoked.
+### Google Sheets auth error about missing `client_email`
+
+Cause: `GOOGLE_SERVICE_ACCOUNT_FILE` points to an OAuth token file instead of a service-account JSON.
+
 Fix:
-- Regenerate OAuth token JSON.
-- Update `DRIVE_TOKEN_JSON` value.
 
-### Queue unavailable (503 on webhook)
-Cause: Redis unavailable or wrong URL.
+- use a real service-account JSON for Sheets
+- keep Drive OAuth in `DRIVE_TOKEN_JSON`
+
+### Drive error `invalid_grant`
+
+Cause: Drive refresh token is expired or revoked.
+
 Fix:
-- Verify `REDIS_URL`.
-- Verify Redis network access from service.
 
-### Glide rate limits / reconcile failures
-Fixes:
-- Reduce reconcile frequency.
-- Use `--limit` for scoped recovery.
-- Retry with stable network and credentials.
+- regenerate the token JSON
+- update `DRIVE_TOKEN_JSON`
+
+### Queue unavailable / webhook returns `503`
+
+Cause: Redis unreachable or misconfigured.
+
+Fix:
+
+- verify `REDIS_URL`
+- verify network access from the running service
 
 ### CXO report not sent
+
 Checklist:
+
 - `CXO_REPORT_ENABLED=1`
 - `CXO_REPORT_TO_EMAIL` and `CXO_REPORT_FROM_EMAIL` set
 - SMTP credentials valid
-- Script run from `service/` with env loaded
+- script run from `service/` with env loaded
 
-## Security Practices
+## Security
 
 Never commit:
+
 - `.env` files
-- service account JSON keys
+- service-account JSON files
 - Drive OAuth token JSON
-- AppSheet/Glide/LLM API keys
+- SMTP passwords
+- API keys
 
-Use environment/secret manager in deployment.
+Operational rules:
 
-Protect admin endpoints behind trusted network/auth.
-
-Avoid printing raw secrets in logs or traces.
+- protect admin endpoints at network/auth layer
+- avoid printing raw secrets in logs
+- rotate credentials if they were exposed in terminal history, screenshots, or chat logs
 
 ## Known Limitations
 
-- Startup migration runner currently applies SQL files `001..010` only.
-- Test coverage is minimal; no broad automated test suite is currently enforced.
-- Admin endpoints are operationally useful but should be access-controlled externally.
+- startup migrator currently applies SQL files `001` to `010` only
+- broad automated test coverage is still limited
+- admin endpoints are powerful and rely on external protection
 
-## Maintenance Checklist
+## Release Checklist
 
-For each release:
-1. Verify env keys for target environment.
-2. Validate DB migrations applied.
-3. Validate `/health` provider/model values.
-4. Smoke test one webhook event per key path.
-5. Verify AppSheet/Teams/n8n downstream behavior.
-6. Verify CXO report script in dry run/manual run context.
+1. verify env values for the target environment
+2. verify migrations are applied
+3. verify `/health`
+4. smoke-test one webhook on each major path
+5. verify downstream AppSheet/Teams/n8n behavior
+6. verify CXO manual run path if report delivery changed
