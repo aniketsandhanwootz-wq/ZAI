@@ -223,6 +223,29 @@ class SheetsTool:
         self._cache[tab_key] = t
         return t
 
+    def _table_by_name(self, tab_name: str) -> Dict[str, Any]:
+        """
+        Read-only helper for tabs that are not part of the main mapping file.
+        Useful for external sheets with their own headers.
+        """
+        cache_key = f"__tab__::{self._sheet_id}::{_key(tab_name)}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        values = self._get_values(f"{tab_name}!A:ZZ")
+        if not values:
+            t = {"tab_name": tab_name, "headers": [], "keys": [], "idx": {}, "rows": []}
+            self._cache[cache_key] = t
+            return t
+
+        headers = [_norm_header(h) for h in values[0]]
+        keys = [_key(h) for h in headers]
+        idx = {keys[i]: i for i in range(len(keys)) if keys[i]}
+        rows = values[1:]
+        t = {"tab_name": tab_name, "headers": headers, "keys": keys, "idx": idx, "rows": rows}
+        self._cache[cache_key] = t
+        return t
+
     def _row_to_dict(self, table: Dict[str, Any], row: List[Any]) -> Dict[str, Any]:
         """
         Row dict keys are CASEFOLD-normalized header keys.
@@ -505,6 +528,18 @@ class SheetsTool:
         """
         Build normalized supplier-id -> company-name map from Suppliers capmap tab.
         """
+        external_sheet_id = (getattr(self.settings, "cxo_supplier_db_spreadsheet_id", "") or "").strip()
+        if external_sheet_id:
+            external = SheetsTool(self.settings, spreadsheet_id=external_sheet_id)
+            return external.build_lookup_map(
+                tab_name=(getattr(self.settings, "cxo_supplier_db_tab_name", "") or "Supplier").strip() or "Supplier",
+                key_column=(getattr(self.settings, "cxo_supplier_db_id_column", "") or "ID").strip() or "ID",
+                value_column=(
+                    getattr(self.settings, "cxo_supplier_db_company_name_column", "") or "Company_Name"
+                ).strip()
+                or "Company_Name",
+            )
+
         rows = self.list_supplier_capmap()
         if not rows:
             return {}
@@ -522,6 +557,35 @@ class SheetsTool:
             if ks in out:
                 continue
             out[ks] = cname
+        return out
+
+    def build_lookup_map(self, *, tab_name: str, key_column: str, value_column: str) -> Dict[str, str]:
+        """
+        Generic read-only ID -> label lookup from any tab in the current spreadsheet.
+        This only uses Sheets values.get and never writes back.
+        """
+        t = self._table_by_name(tab_name)
+        if not t["headers"]:
+            return {}
+
+        idx = t.get("idx", {})
+        key_idx = idx.get(_key(key_column))
+        value_idx = idx.get(_key(value_column))
+        if key_idx is None:
+            raise RuntimeError(f"Tab '{tab_name}' missing column: '{key_column}'")
+        if value_idx is None:
+            raise RuntimeError(f"Tab '{tab_name}' missing column: '{value_column}'")
+
+        out: Dict[str, str] = {}
+        for r in t["rows"]:
+            k = _norm_value(r[key_idx] if key_idx < len(r) else "")
+            v = _norm_value(r[value_idx] if value_idx < len(r) else "")
+            if not k or not v:
+                continue
+            kk = _key(k)
+            if kk in out:
+                continue
+            out[kk] = v
         return out
 
     def resolve_supplier_names(

@@ -342,6 +342,10 @@ class Settings:
     smtp_use_starttls: bool
     cxo_report_max_payload_bytes: int
     cxo_report_fail_open: bool
+    cxo_supplier_db_spreadsheet_id: str
+    cxo_supplier_db_tab_name: str
+    cxo_supplier_db_id_column: str
+    cxo_supplier_db_company_name_column: str
 
 def load_settings() -> Settings:
     llm_provider = _get_env("LLM_PROVIDER", "openai_compat")
@@ -375,6 +379,10 @@ def load_settings() -> Settings:
     cxo_report_days = int(_get_env("CXO_REPORT_DAYS", "3") or "3")
     cxo_report_batch_size = int(_get_env("CXO_REPORT_BATCH_SIZE", "20") or "20")
     smtp_use_starttls = _get_env("SMTP_USE_STARTTLS", "1").lower() in ("1", "true", "yes", "y")
+    cxo_supplier_db_spreadsheet_id = _get_env("CXO_SUPPLIER_DB_SHEET_ID", "").strip()
+    cxo_supplier_db_tab_name = _get_env("CXO_SUPPLIER_DB_TAB_NAME", "Supplier").strip() or "Supplier"
+    cxo_supplier_db_id_column = _get_env("CXO_SUPPLIER_DB_ID_COLUMN", "ID").strip() or "ID"
+    cxo_supplier_db_company_name_column = _get_env("CXO_SUPPLIER_DB_COMPANY_NAME_COLUMN", "Company_Name").strip() or "Company_Name"
     langsmith_tracing = _get_env("LANGSMITH_TRACING", _get_env("LANGCHAIN_TRACING_V2", "0")).lower() in ("1", "true", "yes")
     langsmith_project = _get_env("LANGCHAIN_PROJECT", _get_env("LANGSMITH_PROJECT", "zai")).strip() or "zai"
     langsmith_tags = _get_env("LANGSMITH_TAGS", _get_env("LANGCHAIN_TAGS", "")).strip()
@@ -588,6 +596,10 @@ def load_settings() -> Settings:
         smtp_use_starttls=smtp_use_starttls,
         cxo_report_max_payload_bytes=cxo_report_max_payload_bytes,
         cxo_report_fail_open=cxo_report_fail_open,
+        cxo_supplier_db_spreadsheet_id=cxo_supplier_db_spreadsheet_id,
+        cxo_supplier_db_tab_name=cxo_supplier_db_tab_name,
+        cxo_supplier_db_id_column=cxo_supplier_db_id_column,
+        cxo_supplier_db_company_name_column=cxo_supplier_db_company_name_column,
     )
 
 
