@@ -65,6 +65,7 @@ def build_thread_snapshot(settings, state: Dict[str, any]) -> Dict[str, any]:
     project = state.get("project_name") or ""
     part = state.get("part_number") or ""
     status = state.get("checkin_status") or ""
+    dispatch_date = state.get("dispatch_date") or ""
     desc = state.get("checkin_description") or ""
 
     convos: List[Dict[str, any]] = state.get("conversation_rows") or []
@@ -75,7 +76,10 @@ def build_thread_snapshot(settings, state: Dict[str, any]) -> Dict[str, any]:
         if remark:
             recent_remarks.append(f"[{st}] {remark}".strip() if st else remark)
 
-    header = f"Project: {project} | Part: {part} | Status: {status}".strip()
+    header_bits = [f"Project: {project}", f"Part: {part}", f"Status: {status}"]
+    if dispatch_date:
+        header_bits.append(f"Dispatch Date: {dispatch_date}")
+    header = " | ".join(header_bits).strip()
     body = f"Description: {desc}".strip() if desc else "Description: (empty)"
     convo = (
         "Recent conversation:\n- " + "\n- ".join(recent_remarks)

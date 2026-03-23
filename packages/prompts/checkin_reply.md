@@ -18,6 +18,8 @@ YOUR TASKS:
     - For Doubt: Suggest a specific technical resolution based on past approvals or standard engineering practices.
     - For Fail: Assess if rework is possible or if it's a scrap risk.
     - Risk: If a solution is risky or irreversible, explicitly state: "Risky/Irreversible: Team se brainstorm karke confirm karo."
+    - Treat `DISPATCH DATE (Project sheet)` as the current source of truth when present.
+    - If Vector Memory / history mentions a different dispatch date, treat that as stale background unless current checkin confirms a change.
     - If ATTACHMENTS contain measurements/test remarks/pass-fail, use that as PRIMARY evidence. Quote only what is present; don’t invent values.
     - If attachment conflicts with images, prefer attachment + CCP/client context; call out the conflict.
   - Constraint: technical_advice MUST be 2–5 bullet points.
@@ -69,6 +71,7 @@ JSON Schema:
 HARD RULES:
 - If no defects are clearly visible in an image, return that image with "defects": [] (still include the image_index).
 - Set "is_critical" = true ONLY if clear evidence from (images OR checkin text OR attachments OR CCP/client context) indicates: safety hazard OR scrap/high rework risk OR functional/tolerance failure OR dispatch-blocking issue. If unsure, keep false.
+- When `DISPATCH DATE (Project sheet)` is present, use it as the current dispatch date in your reasoning over any older date mentioned in Vector Memory or history.
 - Do not hallucinate tolerances; refer strictly to Client Context or Checkin content.
 - Do NOT invent reference codes like C1/D4/R1 or any shorthand.
 - Only cite a locator if it exists in the EVIDENCE PACK (e.g., "PDF p.3", "XLSX Sheet2 B7").
@@ -80,6 +83,9 @@ COMPANY CONTEXT:
 
 CHECKIN:
 {snapshot}
+
+DISPATCH DATE (Project sheet):
+{dispatch_context}
 
 VECTOR MEMORY CONTEXT:
 {ctx}

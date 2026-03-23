@@ -228,6 +228,7 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
 
     state["project_name"] = project_name or None
     state["part_number"] = part_number or None
+    state["dispatch_date"] = None
     state["checkin_status"] = _norm_value((checkin_row or {}).get(k_ci_status, ""))
     state["checkin_description"] = _norm_value((checkin_row or {}).get(k_ci_desc, ""))
 
@@ -359,10 +360,12 @@ def load_sheet_data(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]
             try:
                 k_pname = _key(sheets.map.col("project", "project_name"))
                 k_ppart = _key(sheets.map.col("project", "part_number"))
+                k_pdispatch = _key(sheets.map.col("project", "dispatch_date"))
                 if not project_name:
                     project_name = _norm_value(project_row.get(k_pname, ""))
                 if not part_number:
                     part_number = _norm_value(project_row.get(k_ppart, ""))
+                state["dispatch_date"] = _norm_value(project_row.get(k_pdispatch, "")) or None
                 state["project_name"] = project_name or None
                 state["part_number"] = part_number or None
             except Exception:

@@ -13,6 +13,7 @@ class GraphState:
     project_name: Optional[str] = None
     part_number: Optional[str] = None
     legacy_id: Optional[str] = None
+    dispatch_date: Optional[str] = None
     checkin_id: Optional[str] = None
     conversation_id: Optional[str] = None
     ccp_id: Optional[str] = None

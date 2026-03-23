@@ -115,6 +115,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
 
     ctx = (state.get("packed_context") or "").strip()
     closure_notes = (state.get("closure_notes") or "").strip()
+    dispatch_date = (state.get("dispatch_date") or "").strip()
 
     company_name = (state.get("company_name") or "").strip()
     company_desc = (state.get("company_description") or "").strip()
@@ -126,6 +127,10 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             f"- Company: {company_name or '(unknown)'}\n"
             f"- What matters to them / constraints (from Glide): {company_desc or '(not provided)'}\n"
         ).strip()
+
+    dispatch_context = ""
+    if dispatch_date:
+        dispatch_context = f"Planned dispatch date from Project sheet: {dispatch_date}"
 
     # Attachments summary (human readable)
     attachment_context = (state.get("attachment_context") or "").strip()
@@ -144,6 +149,7 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
             "snapshot": snapshot,
             "ctx": ctx,
             "closure_notes": closure_notes,
+            "dispatch_context": dispatch_context,
             "company_context": company_context,
             "attachment_context": attachment_context,
             "evidence_pack": evidence_pack_text,
@@ -155,6 +161,8 @@ def generate_ai_reply(settings: Settings, state: Dict[str, Any]) -> Dict[str, An
         prompt = (prompt.strip() + "\n\n" + attachment_context.strip()).strip()
     if evidence_pack_text and "{evidence_pack}" not in template:
         prompt = (prompt.strip() + "\n\n" + evidence_pack_text.strip()).strip()
+    if dispatch_context and "{dispatch_context}" not in template:
+        prompt = (prompt.strip() + "\n\nDISPATCH DATE (Project sheet):\n" + dispatch_context.strip()).strip()
 
     images = state.get("media_images") or []
     if not isinstance(images, list):
