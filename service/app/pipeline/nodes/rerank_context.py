@@ -252,7 +252,7 @@ def rerank_context(settings, state: Dict[str, Any]) -> Dict[str, Any]:
                 packed.append(f"- C{i}: {_safe_str(t, 520)}")
 
     if dash_r:
-        packed.append("\nPROJECT UPDATES (recent constraints / priorities):")
+        packed.append("\nUPDATES TILL NOW:")
         for i, it in enumerate(dash_r[:4], start=1):
             packed.append(f"- D{i}: {_safe_str((it.get('update_message') or '').strip(), 520)}")
 
