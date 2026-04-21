@@ -102,9 +102,16 @@ def _dispatch_sort_key(s: str) -> Tuple[int, datetime]:
     return (0, dt)
 
 
-def _is_mfg_status(s: str) -> bool:
+def _is_cxo_report_status(s: str) -> bool:
     v = _cf(s)
-    return v in ("mfg", "manufacturing", "in mfg", "in manufacturing")
+    return v in (
+        "mfg",
+        "manufacturing",
+        "in mfg",
+        "in manufacturing",
+        "sampling",
+        "ready for dispatch",
+    )
 
 
 @dataclass(frozen=True)
@@ -195,8 +202,8 @@ class CXOReportTool:
             if not tenant_id or not legacy_id or not project_name or not part_number:
                 continue
 
-            # STRICT: only manufacturing
-            if not _is_mfg_status(status_assembly):
+            # Include the statuses currently meant to appear in the CXO report.
+            if not _is_cxo_report_status(status_assembly):
                 continue
 
             out.append(

@@ -375,15 +375,33 @@ def _render_detail_cell(v: str, *, none_light_red: bool = False) -> str:
     return "<ul style='margin:0; padding-left:18px;'>" + "".join(f"<li>{x}</li>" for x in items) + "</ul>"
 
 
+def _scope_status_counts(assemblies: List[Assembly]) -> str:
+    counts = {
+        "Mfg": 0,
+        "Sampling": 0,
+        "Ready for Dispatch": 0,
+    }
+    for a in assemblies or []:
+        status = str(a.status_assembly or "").strip().casefold()
+        if status in {"mfg", "manufacturing", "in mfg", "in manufacturing"}:
+            counts["Mfg"] += 1
+        elif status == "sampling":
+            counts["Sampling"] += 1
+        elif status == "ready for dispatch":
+            counts["Ready for Dispatch"] += 1
+    return " | ".join(f"{label}={counts[label]}" for label in ("Mfg", "Sampling", "Ready for Dispatch"))
+
+
 def _build_table_report_html(
     *,
+    assemblies: List[Assembly],
     rows: List[CXOTableRow],
     start_ts: datetime,
     now_ts: datetime,
     days: int,
 ) -> str:
     header_html = (
-        f"<p><b>Scope:</b> Manufacturing assemblies={len(rows)} | "
+        f"<p><b>Scope:</b> {_scope_status_counts(assemblies)} | "
         f"Window: last {days} day(s) (IST) from {start_ts.strftime('%d/%m %H:%M')} to {now_ts.strftime('%d/%m %H:%M')} | "
         f"Time filter: created_at (not updated_at)</p>"
     )
@@ -649,12 +667,12 @@ def main() -> None:
     sheets = SheetsTool(s)
     tool = CXOReportTool(s)
 
-    logger.info("Loading Project sheet assemblies (mfg-only).")
+    logger.info("Loading Project sheet assemblies for CXO report scope.")
     all_assemblies: List[Assembly] = tool.load_all_assemblies(sheets)
-    logger.info("MFG assemblies loaded: %d", len(all_assemblies))
+    logger.info("CXO-scope assemblies loaded: %d", len(all_assemblies))
 
     if not all_assemblies:
-        logger.info("No MFG assemblies. Exiting.")
+        logger.info("No CXO-scope assemblies. Exiting.")
         return
 
     days = int(getattr(s, "cxo_report_days", 3) or 3)
@@ -701,6 +719,7 @@ def main() -> None:
     rows = tool.merge_rows_when_both_none(rows)
     logger.info("Table rows after merge=%d", len(rows))
     final_html = _build_table_report_html(
+        assemblies=assemblies_sorted,
         rows=rows,
         start_ts=start_ts,
         now_ts=now_ts,
