@@ -208,9 +208,6 @@ class Settings:
     database_url: str
     redis_url: str
 
-    # n8n whatsapp integration
-    n8n_whatsapp_webhook_url: str
-
     # Sheets
     spreadsheet_id: str
     google_service_account_json: str  # raw JSON string OR file path
@@ -218,11 +215,6 @@ class Settings:
     # Optional: separate spreadsheet for additional photos
     additional_photos_spreadsheet_id: str
     additional_photos_tab_name: str
-
-    # ZAI Cues Log (separate spreadsheet)
-    zai_cues_log_enabled: bool
-    zai_cues_log_spreadsheet_id: str
-    zai_cues_log_tab_name: str
 
     # Drive
     google_drive_root_folder_id: str
@@ -234,29 +226,12 @@ class Settings:
     vision_api_key: str
     vision_model: str
 
-    # Teams
+    # Teams (still used by routers/teams_test.py)
     teams_webhook_url: str
 
-    # AppSheet (Cues)
-    appsheet_base_url: str
-    appsheet_app_id: str
-    appsheet_access_key: str
-    appsheet_cues_table: str
-
-    # AppSheet (Conversation critical trigger)
-    appsheet_conversation_table: str
-    appsheet_conversation_key_col: str
-    appsheet_conversation_critical_col: str
-
-    # Optional column overrides (if your table uses different headers)
-    appsheet_cues_col_cue: str
-    appsheet_cues_col_cue_id: str
-    appsheet_cues_col_id: str
-    appsheet_cues_col_generated_at: str
-    appsheet_cues_col_context: str
-
-    # Power Automate (Teams routing flow webhook)
-    power_automate_webhook_url: str
+    # wootzcheckin internal API (CQTS classification — daily batch)
+    wootzcheckin_api_url: str
+    wootzcheckin_api_secret: str
 
     # ✅ Single webhook secret for Apps Script
     webhook_secret: str
@@ -353,9 +328,6 @@ def load_settings() -> Settings:
     llm_model = _get_env("LLM_MODEL", "gpt-4o-mini")
     llm_fallback_models = _get_env("LLM_FALLBACK_MODELS", "")
 
-    # n8n WhatsApp integration
-    n8n_whatsapp_webhook_url = _get_env("N8N_WHATSAPP_WEBHOOK_URL", "")
-
     embedding_provider = _get_env("EMBEDDING_PROVIDER", "gemini")
     embedding_api_key = _get_env("EMBEDDING_API_KEY", llm_api_key)
     embedding_model = _get_env("EMBEDDING_MODEL", "models/embedding-001")
@@ -396,30 +368,9 @@ def load_settings() -> Settings:
 
     teams_webhook_url = _get_env("TEAMS_WEBHOOK_URL", "")
 
-    # AppSheet (Cues)
-    appsheet_base_url = _get_env("APPSHEET_BASE_URL", "https://api.appsheet.com").rstrip("/")
-    appsheet_app_id = _get_env("APPSHEET_APP_ID", "")
-    appsheet_access_key = _get_env("APPSHEET_ACCESS_KEY", "")
-    appsheet_cues_table = _get_env("APPSHEET_CUES_TABLE", "")
-
-    # Column names (override only if your AppSheet columns differ)
-    appsheet_cues_col_cue = _get_env("APPSHEET_CUES_COL_CUE", "Cue")
-    appsheet_cues_col_cue_id = _get_env("APPSHEET_CUES_COL_CUE_ID", "Cue ID")
-    appsheet_cues_col_id = _get_env("APPSHEET_CUES_COL_ID", "ID")
-
-    # support BOTH names
-    appsheet_cues_col_generated_at = _get_env(
-        "APPSHEET_CUES_COL_GENERATED_AT",
-        _get_env("APPSHEET_CUES_COL_DATE", "Date"),
-    )
-    appsheet_cues_col_context = _get_env("APPSHEET_CUES_COL_CONTEXT", "Context")
-
-    # AppSheet (Conversation critical trigger)
-    appsheet_conversation_table = _get_env("APPSHEET_CONVERSATION_TABLE", "Conversation")
-    appsheet_conversation_key_col = _get_env("APPSHEET_CONVERSATION_KEY_COL", "Conversation ID")
-    appsheet_conversation_critical_col = _get_env("APPSHEET_CONVERSATION_CRITICAL_COL", "Critical")
-    # Power Automate (Teams routing flow webhook)
-    power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
+    # wootzcheckin internal API (CQTS classification — daily batch, see cqts_graph.py)
+    wootzcheckin_api_url = _get_env("WOOTZCHECKIN_API_URL", "").rstrip("/")
+    wootzcheckin_api_secret = _get_env("WOOTZCHECKIN_API_SECRET", "")
 
     # Sheets auth
     sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
@@ -486,11 +437,7 @@ def load_settings() -> Settings:
     glide_boughtouts_legacy_id_column = ov["glide_boughtouts_legacy_id_column"]
     glide_boughtouts_project_row_id_column = ov["glide_boughtouts_project_row_id_column"]
     glide_boughtouts_title_column = ov["glide_boughtouts_title_column"]
-    sheets_mapping_path = _get_env("SHEETS_MAPPING_PATH", "packages/contracts/sheets_mapping.yaml")    
-    # ZAI Cues Log (new spreadsheet)
-    zai_cues_log_enabled = _get_env("ZAI_CUES_LOG_ENABLED", "0").lower() in ("1", "true", "yes", "y")
-    zai_cues_log_spreadsheet_id = _get_env("ZAI_CUES_LOG_SHEET_ID", "").strip()
-    zai_cues_log_tab_name = _get_env("ZAI_CUES_LOG_TAB_NAME", "ZAI_CUES_LOG").strip() or "ZAI_CUES_LOG"
+    sheets_mapping_path = _get_env("SHEETS_MAPPING_PATH", "packages/contracts/sheets_mapping.yaml")
     return Settings(
         database_url=_get_env("DATABASE_URL", required=True),
         redis_url=_get_env("REDIS_URL", required=True),
@@ -505,19 +452,8 @@ def load_settings() -> Settings:
         vision_api_key=vision_api_key,
         vision_model=vision_model,
         teams_webhook_url=teams_webhook_url,
-        appsheet_base_url=appsheet_base_url,
-        appsheet_app_id=appsheet_app_id,
-        appsheet_access_key=appsheet_access_key,
-        appsheet_cues_table=appsheet_cues_table,
-        appsheet_cues_col_cue=appsheet_cues_col_cue,
-        appsheet_cues_col_cue_id=appsheet_cues_col_cue_id,
-        appsheet_cues_col_id=appsheet_cues_col_id,
-        appsheet_cues_col_generated_at=appsheet_cues_col_generated_at,
-        appsheet_cues_col_context=appsheet_cues_col_context,
-        appsheet_conversation_table=appsheet_conversation_table,
-        appsheet_conversation_key_col=appsheet_conversation_key_col,
-        appsheet_conversation_critical_col=appsheet_conversation_critical_col,
-        power_automate_webhook_url=power_automate_webhook_url,
+        wootzcheckin_api_url=wootzcheckin_api_url,
+        wootzcheckin_api_secret=wootzcheckin_api_secret,
         webhook_secret=webhook_secret,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,
@@ -574,14 +510,9 @@ def load_settings() -> Settings:
         glide_boughtouts_title_column=glide_boughtouts_title_column,
         sheets_mapping_path=sheets_mapping_path,
 
-        n8n_whatsapp_webhook_url=n8n_whatsapp_webhook_url,
         langsmith_tracing=langsmith_tracing,
         langsmith_project=langsmith_project,
         langsmith_tags=langsmith_tags,
-
-        zai_cues_log_enabled=zai_cues_log_enabled,
-        zai_cues_log_spreadsheet_id=zai_cues_log_spreadsheet_id,
-        zai_cues_log_tab_name=zai_cues_log_tab_name,
 
         cxo_report_enabled=cxo_report_enabled,
         cxo_report_to_email=cxo_report_to_email,

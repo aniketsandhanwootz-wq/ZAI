@@ -22,6 +22,10 @@ langchain==1.2.12
 langgraph==1.1.2
 langsmith
 
+# CQTS classification — structured Gemini output via langchain-google-genai's
+# consolidated google-genai SDK (4.0.0+, off the legacy google-ai-generativelanguage SDK)
+langchain-google-genai>=4.0.0
+
 
 pyyaml==6.0.3
 pypdf==6.9.1

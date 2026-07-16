@@ -50,12 +50,12 @@ build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_th
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
 analyze_attachments = _resolve_node(".nodes.analyze_attachments", ["analyze_attachments", "run", "node"])
 upsert_vectors = _resolve_node(".nodes.upsert_vectors", ["upsert_vectors_node", "upsert_vectors", "run", "node"])
-retrieve_context = _resolve_node(".nodes.retrieve_context", ["retrieve_context_node", "retrieve_context", "run", "node"])
-rerank_context = _resolve_node(".nodes.rerank_context", ["rerank_context", "run", "node"])
-generate_ai_reply = _resolve_node(".nodes.generate_ai_reply", ["generate_ai_reply_node", "generate_ai_reply", "run", "node"])
-annotate_media = _resolve_node(".nodes.annotate_media", ["annotate_media", "run", "node"])
-writeback = _resolve_node(".nodes.writeback", ["writeback_node", "writeback", "run", "node"])
-generate_assembly_todo = _resolve_node(".nodes.generate_assembly_todo", ["generate_assembly_todo", "run", "node"])
+# NOTE: retrieve_context/rerank_context are reused (unchanged) by the separate,
+# daily-batch cqts_graph.py CQTS classification pipeline — not wired into this
+# real-time, webhook-driven ingest graph. generate_ai_reply/annotate_media/
+# writeback/generate_assembly_todo (cues) were removed entirely — see the CQTS
+# plan's Part 3 for why (reply/writeback replaced by the daily batch; cues
+# retired along with the AppSheet Cues table).
 
 def _tenant_from_payload(payload: Dict[str, Any]) -> str:
     rmeta = payload.get("meta") or {}
@@ -239,12 +239,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                 from .ingest.ccp_ingest import ingest_ccp_one
 
                 out = ingest_ccp_one(settings, ccp_id=ccp_id)
-                # Also refresh assembly checklist if project is already in MFG
-                try:
-                    state["payload"] = payload
-                    state = _timed("generate_assembly_todo", generate_assembly_todo)
-                except Exception as _e:
-                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after CCP_UPDATED: {_e}")
                 runlog.success(run_id)
                 return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
 
@@ -290,15 +284,6 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                         f"DASHBOARD_UPDATED ingested dashboard_update_id={resolved_dashboard_update_id}"
                     )
 
-                # Also refresh assembly checklist if project is already in MFG
-                try:
-                    state["payload"] = payload
-                    state = _timed("generate_assembly_todo", generate_assembly_todo)
-                except Exception as _e:
-                    (state.get("logs") or []).append(
-                        f"assembly_todo: non-fatal after DASHBOARD_UPDATED(dashboard_update_id): {_e}"
-                    )
-
                 runlog.success(run_id)
                 return {
                     "run_id": run_id,
@@ -307,44 +292,39 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "dashboard_update_id": resolved_dashboard_update_id,
                     "result": out,
                     "skipped": bool(out.get("skipped")),
-                    "assembly_todo_written": state.get("assembly_todo_written"),
                     "logs": state.get("logs"),
                 }
             # -------------------------
             # Project status trigger (cron -> mfg)
             # -------------------------
+            # PROJECT_UPDATED's only job was refreshing the "cues" assembly
+            # checklist (generate_assembly_todo), which was retired along
+            # with the AppSheet Cues table (see CQTS plan Part 3). Kept as an
+            # explicit no-op rather than removed from _ALLOWED_EVENT_TYPES in
+            # case anything external still fires it.
             if event_type == "PROJECT_UPDATED":
-                # payload should contain legacy_id (Project.ID)
-                state = _timed("generate_assembly_todo", generate_assembly_todo)
                 runlog.success(run_id)
                 return {
                     "run_id": run_id,
                     "ok": True,
+                    "skipped": True,
+                    "reason": "cues retired; PROJECT_UPDATED is a no-op",
                     "event_type": event_type,
                     "legacy_id": str(payload.get("legacy_id") or "").strip(),
-                    "assembly_todo_written": state.get("assembly_todo_written"),
                     "logs": state.get("logs"),
                 }
             # -------------------------
             # Checkin / Conversation flow
             # -------------------------
-            # Reply/writeback ONLY for CHECKIN_CREATED (your requirement)
-            force_reply = _truthy(m.get("force_reply"))
-            ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
-            ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
-            if event_type == "CHECKIN_CREATED" and force_reply:
-                ingest_only = False
-
+            # This graph is ingest-only now: it keeps ZAI's own vector store
+            # (incident_vectors) current for RAG. Reply generation/writeback
+            # was retired — CQTS classification runs separately, once a day,
+            # via cqts_graph.py / run_cqts_classification.py, reading and
+            # writing through wootzcheckin's own internal API rather than
+            # this webhook-driven pipeline.
             media_only = _truthy(m.get("media_only"))
 
             state = _timed("load_sheet_data", load_sheet_data)
-
-            # Always try to refresh assembly checklist after any relevant event.
-            # Node itself will skip unless Project.Status_assembly == 'mfg'.
-            try:
-                state = _timed("generate_assembly_todo", generate_assembly_todo)
-            except Exception as _e:
-                (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
 
             tenant_id = str(state.get("tenant_id") or "").strip()
             if tenant_id and tenant_id != tenant_id_hint:
@@ -355,113 +335,73 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             # NEW: ingest + analyze "Files" attachments (idempotent)
             state = _timed("analyze_attachments", analyze_attachments)
 
-            # ingest-only modes
-            if ingest_only:
-                if media_only:
-                    caps = state.get("image_captions") or []
-                    cap_lines = _clean_lines(caps, max_items=12)
-                    if not cap_lines:
-                        (state.get("logs") or []).append("ingest_only(media_only): no captions found; skipping MEDIA vector")
-                        runlog.success(run_id)
-                        return {
-                            "run_id": run_id,
-                            "ok": True,
-                            "primary_id": primary_id,
-                            "event_type": event_type,
-                            "ingest_only": True,
-                            "media_only": True,
-                            "media_upserted": False,
-                            "logs": state.get("logs"),
-                        }
-
-                    from ..tools.embed_tool import EmbedTool
-                    from ..tools.vector_tool import VectorTool
-
-                    checkin_id = str(state.get("checkin_id") or "").strip()
-                    if not tenant_id or not checkin_id:
-                        (state.get("logs") or []).append("ingest_only(media_only): missing tenant/checkin; cannot upsert")
-                        runlog.success(run_id)
-                        return {
-                            "run_id": run_id,
-                            "ok": True,
-                            "primary_id": primary_id,
-                            "event_type": event_type,
-                            "ingest_only": True,
-                            "media_only": True,
-                            "media_upserted": False,
-                            "logs": state.get("logs"),
-                        }
-
-                    media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
-                    emb = EmbedTool(settings).embed_text(media_text)
-                    VectorTool(settings).upsert_incident_vector(
-                        tenant_id=tenant_id,
-                        checkin_id=checkin_id,
-                        vector_type="MEDIA",
-                        embedding=emb,
-                        project_name=state.get("project_name"),
-                        part_number=state.get("part_number"),
-                        legacy_id=state.get("legacy_id"),
-                        status=state.get("checkin_status") or "",
-                        text=media_text,
-                    )
-                    (state.get("logs") or []).append(f"ingest_only(media_only): upserted MEDIA vector (captions={len(cap_lines)})")
-
+            if media_only:
+                caps = state.get("image_captions") or []
+                cap_lines = _clean_lines(caps, max_items=12)
+                if not cap_lines:
+                    (state.get("logs") or []).append("media_only: no captions found; skipping MEDIA vector")
                     runlog.success(run_id)
                     return {
                         "run_id": run_id,
                         "ok": True,
                         "primary_id": primary_id,
                         "event_type": event_type,
-                        "ingest_only": True,
                         "media_only": True,
-                        "media_upserted": True,
+                        "media_upserted": False,
                         "logs": state.get("logs"),
                     }
 
-                state = _timed("upsert_vectors", upsert_vectors)
+                from ..tools.embed_tool import EmbedTool
+                from ..tools.vector_tool import VectorTool
+
+                checkin_id = str(state.get("checkin_id") or "").strip()
+                if not tenant_id or not checkin_id:
+                    (state.get("logs") or []).append("media_only: missing tenant/checkin; cannot upsert")
+                    runlog.success(run_id)
+                    return {
+                        "run_id": run_id,
+                        "ok": True,
+                        "primary_id": primary_id,
+                        "event_type": event_type,
+                        "media_only": True,
+                        "media_upserted": False,
+                        "logs": state.get("logs"),
+                    }
+
+                media_text = "MEDIA CAPTIONS (from inspection photos/docs):\n" + "\n".join([f"- {c}" for c in cap_lines])
+                emb = EmbedTool(settings).embed_text(media_text)
+                VectorTool(settings).upsert_incident_vector(
+                    tenant_id=tenant_id,
+                    checkin_id=checkin_id,
+                    vector_type="MEDIA",
+                    embedding=emb,
+                    project_name=state.get("project_name"),
+                    part_number=state.get("part_number"),
+                    legacy_id=state.get("legacy_id"),
+                    status=state.get("checkin_status") or "",
+                    text=media_text,
+                )
+                (state.get("logs") or []).append(f"media_only: upserted MEDIA vector (captions={len(cap_lines)})")
+
                 runlog.success(run_id)
-                logger.info("SUCCESS(ingest_only) primary_id=%s", primary_id)
                 return {
                     "run_id": run_id,
                     "ok": True,
                     "primary_id": primary_id,
                     "event_type": event_type,
-                    "ingest_only": True,
+                    "media_only": True,
+                    "media_upserted": True,
                     "logs": state.get("logs"),
                 }
 
-            # normal pipeline (reply/writeback happens only for CHECKIN_CREATED)
-            if event_type != "CHECKIN_CREATED":
-                # safety: even if caller didn't set ingest_only, we won't reply for other events
-                state = _timed("upsert_vectors", upsert_vectors)
-                runlog.success(run_id)
-                return {
-                    "run_id": run_id,
-                    "ok": True,
-                    "primary_id": primary_id,
-                    "event_type": event_type,
-                    "note": "Non-created event: vectors refreshed, no reply/writeback.",
-                    "logs": state.get("logs"),
-                }
-
-            state = _timed("retrieve_context", retrieve_context)
-            state = _timed("rerank_context", rerank_context)
-            state = _timed("generate_ai_reply", generate_ai_reply)
-            state = _timed("annotate_media", annotate_media)
             state = _timed("upsert_vectors", upsert_vectors)
-            state = _timed("writeback", writeback)
-
             runlog.success(run_id)
-            logger.info("SUCCESS primary_id=%s", primary_id)
-
+            logger.info("SUCCESS(ingest) primary_id=%s", primary_id)
             return {
                 "run_id": run_id,
                 "ok": True,
                 "primary_id": primary_id,
                 "event_type": event_type,
-                "ai_reply": state.get("ai_reply"),
-                "writeback_done": state.get("writeback_done"),
                 "logs": state.get("logs"),
             }
 
