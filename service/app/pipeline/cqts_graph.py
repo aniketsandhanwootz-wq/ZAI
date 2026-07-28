@@ -70,25 +70,29 @@ def _timed(name: str, fn, settings: Settings, state: State) -> State:
 
 
 # ── Structured output schema ────────────────────────────────────────────────
+# Single-bucket classification: a check-in gets at most ONE primary CQTS
+# category. Secondary effects on other categories are folded into
+# recommendedAction's text rather than producing a second bucket entry — see
+# the CQTS plan for why (avoids a checkin fanning out into 3-4 near-duplicate
+# entries when it really has one dominant issue).
 
-Severity = str  # "critical" | "moderate" | "watch" | "none" — validated below
+Severity = str  # "critical" | "moderate" | "watch" — validated below
+Bucket = str  # "cost" | "quality" | "timeline" | "scope" — validated below
 
-
-class CqtsBucketOut(BaseModel):
-    severity: Severity = Field(description="One of: critical, moderate, watch, none")
-    title: str = Field(description="Short label, <= 8 words")
-    rootCause: str
-    recommendedAction: str
+_VALID_BUCKETS = {"cost", "quality", "timeline", "scope"}
+_VALID_SEVERITIES = {"critical", "moderate", "watch"}
 
 
 class CqtsClassificationOut(BaseModel):
-    cost: Optional[CqtsBucketOut] = None
-    quality: Optional[CqtsBucketOut] = None
-    timeline: Optional[CqtsBucketOut] = None
-    scope: Optional[CqtsBucketOut] = None
-
-
-_VALID_SEVERITIES = {"critical", "moderate", "watch", "none"}
+    bucket: Optional[Bucket] = Field(
+        default=None, description="One of: cost, quality, timeline, scope. Unset if nothing applies."
+    )
+    severity: Optional[Severity] = Field(default=None, description="One of: critical, moderate, watch")
+    title: Optional[str] = Field(default=None, description="Short label, <= 8 words")
+    rootCause: Optional[str] = None
+    recommendedAction: Optional[str] = Field(
+        default=None, description="Concrete next step, 60 words maximum"
+    )
 
 
 # ── Nodes ────────────────────────────────────────────────────────────────────
@@ -449,23 +453,37 @@ def classify(settings: Settings, state: State) -> State:
     return state
 
 
+_RECOMMENDED_ACTION_MAX_WORDS = 60
+
+
+def _cap_words(text: str, max_words: int) -> Optional[str]:
+    """None in, None out — a recommendedAction is only sent when the model
+    actually gave one (see cqts_classification.md: 'leave unset unless
+    extremely necessary'). wootzcheckin's schema treats null as "no action
+    needed," not a missing field."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words]) + "…"
+
+
 def validate_and_writeback(settings: Settings, state: State) -> State:
     result: CqtsClassificationOut = state["cqts_result"]
 
     payload: Dict[str, Any] = {}
-    for bucket_key in ("cost", "quality", "timeline", "scope"):
-        bucket: Optional[CqtsBucketOut] = getattr(result, bucket_key)
-        if bucket is None:
-            continue
-        if bucket.severity not in _VALID_SEVERITIES:
-            raise ValueError(f"classify returned invalid severity {bucket.severity!r} for bucket {bucket_key!r}")
-        if bucket.severity == "none":
-            continue
-        payload[bucket_key] = {
-            "severity": bucket.severity,
-            "title": bucket.title,
-            "rootCause": bucket.rootCause,
-            "recommendedAction": bucket.recommendedAction,
+    if result.bucket:
+        if result.bucket not in _VALID_BUCKETS:
+            raise ValueError(f"classify returned invalid bucket {result.bucket!r}")
+        if result.severity not in _VALID_SEVERITIES:
+            raise ValueError(f"classify returned invalid severity {result.severity!r}")
+        payload[result.bucket] = {
+            "severity": result.severity,
+            "title": result.title or "",
+            "rootCause": result.rootCause or "",
+            "recommendedAction": _cap_words(result.recommendedAction or "", _RECOMMENDED_ACTION_MAX_WORDS),
         }
 
     state["cqts_payload"] = payload
