@@ -101,7 +101,10 @@ def analyze_media(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
       - Defect detection is NO LONGER done here.
       - Defects are detected in main prompt (checkin_reply.md) and later annotated+uploaded by annotate_media node.
     """
-    allowed = {"CHECKIN_CREATED", "CHECKIN_UPDATED", "CONVERSATION_ADDED"}
+    allowed = {
+        "CHECKIN_CREATED", "CHECKIN_UPDATED",
+        "CONVERSATION_ADDED", "CONVERSATION_UPDATED", "CONVERSATION_DELETED",
+    }
     if (state.get("event_type") or "") not in allowed:
         (state.get("logs") or []).append(f"analyze_media: skipped (event_type not in {sorted(allowed)})")
         return state

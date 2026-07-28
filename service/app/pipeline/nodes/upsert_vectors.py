@@ -93,4 +93,30 @@ def upsert_vectors(settings: Settings, state: Dict[str, Any]) -> Dict[str, Any]:
         )
         (state.get("logs") or []).append(f"Upserted MEDIA vector (captions={len(cap_lines)})")
 
+    # --- ATTACHMENT vector (PDF/file analysis from analyze_attachments.py) ---
+    # Runs for both Sheets- and wootzcheckin-sourced checkins alike, since
+    # analyze_attachments.py already reads the "files" cell unconditionally
+    # for both. Without this, the extracted text + LLM analysis it computes
+    # only ever lands in checkin_file_artifacts (a plain lookup table, not
+    # searchable) — this makes it reachable via search_problems.
+    attachment_context = (state.get("attachment_context") or "").strip()
+    if attachment_context:
+        attachment_text = (
+            f"{project_name or ''} | {part_number or ''} | CHECKIN {checkin_id}\n"
+            f"ATTACHMENT ANALYSIS (Files column):\n{attachment_context}"
+        ).strip()
+        emb_att = embedder.embed_text(attachment_text)
+        vector_db.upsert_incident_vector(
+            tenant_id=tenant_id,
+            checkin_id=checkin_id,
+            vector_type="ATTACHMENT",
+            embedding=emb_att,
+            project_name=project_name,
+            part_number=part_number,
+            legacy_id=legacy_id,
+            status=status,
+            text=attachment_text,
+        )
+        (state.get("logs") or []).append("Upserted ATTACHMENT vector (file analysis)")
+
     return state

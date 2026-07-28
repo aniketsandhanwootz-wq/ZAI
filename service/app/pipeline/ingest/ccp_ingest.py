@@ -4,6 +4,7 @@ from typing import Dict, Any, Tuple, List, Optional
 from io import BytesIO
 import re
 
+import requests
 from pypdf import PdfReader
 
 from ...config import Settings
@@ -13,6 +14,7 @@ from ...tools.vector_tool import VectorTool
 from ...tools.drive_tool import DriveTool
 from ...tools.attachment_tool import AttachmentResolver, split_cell_refs
 from ...tools.vision_tool import VisionTool
+from ...tools.wootzcheckin_client import WootzCheckinClient
 from . import utils as ingest_utils
 
 
@@ -426,3 +428,155 @@ def ingest_ccp_one(settings: Settings, *, ccp_id: str) -> Dict[str, Any]:
     )
 
     return {"ok": True, "ccp_id": target, **out}
+
+
+def _fetch_url_bytes(url: str, *, timeout: int = 40, max_bytes: int = 15_000_000) -> Optional[bytes]:
+    try:
+        with requests.get(url, timeout=timeout, stream=True) as r:
+            r.raise_for_status()
+            buf = bytearray()
+            for chunk in r.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    return None
+            return bytes(buf)
+    except Exception:
+        return None
+
+
+def ingest_ccp_one_wootz(settings: Settings, *, ccp_id: str) -> Dict[str, Any]:
+    """
+    wootzcheckin (AWS) counterpart to ingest_ccp_one — same chunk/embed/
+    upsert logic (CCP_DESC + PDF_TEXT + IMG_CAPTION, all content-hash
+    deduped via VectorTool, identical to the Sheets path), sourced from
+    GET /internal/ccps/:id instead of the CCP sheet. wootzcheckin's
+    photos/files are already-resolved HTTPS (S3/CloudFront) URLs, so no
+    Drive/AttachmentResolver step is needed — bytes are fetched directly.
+    Called for both CCP_CREATED and CCP_UPDATED (upsert-shaped either way).
+    """
+    target = (ccp_id or "").strip()
+    if not target:
+        return {"ok": False, "error": "missing ccp_id"}
+
+    client = WootzCheckinClient(settings)
+    try:
+        detail = client.get_ccp(target)
+    except Exception as e:
+        return {"ok": True, "skipped": True, "reason": f"ccp_id '{target}' fetch failed: {e}"}
+
+    project = detail.get("project") or {}
+    tenant_id = (project.get("companyRowId") or "").strip()
+    legacy_id = (project.get("legacyId") or "").strip()
+    project_name = project.get("projectName") or ""
+    part_number = project.get("partNumber") or ""
+    ccp_name = detail.get("ccpName") or ""
+    desc = (detail.get("description") or "").strip()
+
+    if not tenant_id:
+        return {"ok": True, "skipped": True, "reason": "missing tenant_id (company_row_id) on project"}
+
+    embedder = EmbedTool(settings)
+    vec = VectorTool(settings)
+    vision = VisionTool(settings)
+
+    chunks_embedded = 0
+    pdf_text_chunks = 0
+    image_caption_chunks = 0
+    resolved_files = 0
+    unresolved_files = 0
+    skipped_existing = 0
+    embed_errors = 0
+
+    if desc:
+        chunks = ingest_utils.chunk_text(_norm_text(f"CCP: {ccp_name}\n{desc}"))
+        for ch in chunks:
+            content_hash = vec.make_ccp_content_hash(ccp_id=target, chunk_type="CCP_DESC", stable_key="DESC", chunk_text=ch)
+            if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=target, chunk_type="CCP_DESC", content_hash=content_hash):
+                skipped_existing += 1
+                continue
+            try:
+                emb = embedder.embed_text(ch)
+                vec.upsert_ccp_chunk(
+                    tenant_id=tenant_id, ccp_id=target, ccp_name=ccp_name,
+                    project_name=project_name, part_number=part_number, legacy_id=legacy_id,
+                    chunk_type="CCP_DESC", chunk_text=ch, source_ref="",
+                    embedding=emb, content_hash=content_hash,
+                )
+                chunks_embedded += 1
+            except Exception:
+                embed_errors += 1
+
+    all_urls: List[str] = [*(detail.get("photos") or []), *(detail.get("files") or [])]
+    for url in all_urls[:50]:
+        url = (url or "").strip()
+        if not url:
+            continue
+        data = _fetch_url_bytes(url)
+        if not data:
+            unresolved_files += 1
+            continue
+        resolved_files += 1
+        file_hash = vec.hash_bytes(data)
+        name = url.split("/")[-1].split("?")[0] or "attachment"
+        is_pdf = _is_pdf_bytes(data) or name.lower().endswith(".pdf")
+        img_mime = _sniff_image_mime(data)
+
+        if is_pdf:
+            text = _norm_text(_extract_pdf_text_from_bytes(data))
+            if not text:
+                continue
+            for ch in ingest_utils.chunk_text(text):
+                content_hash = vec.make_ccp_content_hash(ccp_id=target, chunk_type="PDF_TEXT", stable_key=file_hash, chunk_text=ch)
+                if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=target, chunk_type="PDF_TEXT", content_hash=content_hash):
+                    skipped_existing += 1
+                    continue
+                try:
+                    emb = embedder.embed_text(ch)
+                    vec.upsert_ccp_chunk(
+                        tenant_id=tenant_id, ccp_id=target, ccp_name=ccp_name,
+                        project_name=project_name, part_number=part_number, legacy_id=legacy_id,
+                        chunk_type="PDF_TEXT", chunk_text=ch, source_ref=url,
+                        embedding=emb, content_hash=content_hash,
+                    )
+                    chunks_embedded += 1
+                    pdf_text_chunks += 1
+                except Exception:
+                    embed_errors += 1
+            continue
+
+        if img_mime:
+            context = f"CCP Name: {ccp_name}\nProject: {project_name}\nPart: {part_number}\nSourceRef: {url}\nFileHash: {file_hash}".strip()
+            content_hash = vec.make_ccp_content_hash(ccp_id=target, chunk_type="IMG_CAPTION", stable_key=file_hash, chunk_text="")
+            if vec.ccp_hash_exists(tenant_id=tenant_id, ccp_id=target, chunk_type="IMG_CAPTION", content_hash=content_hash):
+                skipped_existing += 1
+                continue
+            try:
+                caption = _norm_text(vision.caption_image(image_bytes=data, mime_type=img_mime, context=context) or "")
+                if not caption:
+                    continue
+                chunk_text = f"[CCP_IMAGE]\nFILE_HASH: {file_hash}\n{caption}".strip()
+                emb = embedder.embed_text(chunk_text)
+                vec.upsert_ccp_chunk(
+                    tenant_id=tenant_id, ccp_id=target, ccp_name=ccp_name,
+                    project_name=project_name, part_number=part_number, legacy_id=legacy_id,
+                    chunk_type="IMG_CAPTION", chunk_text=chunk_text, source_ref=url,
+                    embedding=emb, content_hash=content_hash,
+                )
+                chunks_embedded += 1
+                image_caption_chunks += 1
+            except Exception:
+                embed_errors += 1
+
+    return {
+        "ok": True,
+        "ccp_id": target,
+        "chunks_embedded": chunks_embedded,
+        "pdf_text_chunks": pdf_text_chunks,
+        "image_caption_chunks": image_caption_chunks,
+        "resolved_files": resolved_files,
+        "unresolved_files": unresolved_files,
+        "skipped_existing": skipped_existing,
+        "embed_errors": embed_errors,
+    }

@@ -25,7 +25,7 @@ from .pipeline.ingest.dashboard_ingest import ingest_dashboard
 from .pipeline.ingest.migrate import run_migrations
 from .logctx import setup_logging, request_id_var
 from .schemas.webhook import WebhookPayload
-from .routers import appsheet_webhook_router, teams_test_router, glide_webhook_router
+from .routers import appsheet_webhook_router, teams_test_router, glide_webhook_router, wootzcheckin_webhook_router
 from .pipeline.ingest.glide_ingest_project import ingest_glide_project
 from .pipeline.ingest.glide_ingest_raw_material import ingest_glide_raw_material
 from .pipeline.ingest.glide_ingest_processes import ingest_glide_processes
@@ -72,6 +72,7 @@ app = FastAPI(title="Wootz Checkin AI (MVP)", lifespan=lifespan)
 app.include_router(appsheet_webhook_router)
 app.include_router(teams_test_router)
 app.include_router(glide_webhook_router)
+app.include_router(wootzcheckin_webhook_router)
 
 
 @app.middleware("http")

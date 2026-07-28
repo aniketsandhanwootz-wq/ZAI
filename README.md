@@ -487,10 +487,26 @@ Behavior:
 - same dependency base
 - runs one-shot `python -m app.scripts.send_cxo_daily_report`
 
+### CQTS classification cron image
+
+`service/Dockerfile.cqts_cron`
+
+- same dependency base
+- runs one-shot `python -m app.scripts.run_cqts_classification --concurrency 4`, once daily
+- polls `GET /internal/checkins/needs-cqts-classification` on wootzcheckin, classifies each
+  (investigate agent + structured Gemini call), writes back via
+  `POST /internal/checkins/:id/cqts-classification` — see `service/app/pipeline/cqts_graph.py`
+- real-time vector ingestion (for both AppSheet- and wootzcheckin-sourced checkins/
+  conversations/CCPs) runs continuously in the web service's embedded worker, not here —
+  this cron only classifies against whatever's already fresh
+- add `--dry-run` via the Render cron job's command override for a trial run that logs the
+  classification it *would* write, without writing anything back
+
 ### Recommended split
 
 - web service: API + embedded worker with `RUN_CONSUMER=1`
 - cron service: CXO report schedule
+- cron service: CQTS classification schedule (daily)
 
 ## Observability
 

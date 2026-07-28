@@ -46,6 +46,7 @@ def _resolve_node(module_rel: str, candidates: List[str]) -> NodeFn:
 
 # Checkin pipeline nodes
 load_sheet_data = _resolve_node(".nodes.load_sheet_data", ["load_sheet_data_node", "load_sheet_data", "run", "node"])
+load_wootz_data = _resolve_node(".nodes.load_wootz_data", ["load_wootz_data_node", "load_wootz_data", "run", "node"])
 build_thread_snapshot = _resolve_node(".nodes.build_thread_snapshot", ["build_thread_snapshot_node", "build_thread_snapshot", "run", "node"])
 analyze_media = _resolve_node(".nodes.analyze_media", ["analyze_media", "run", "node"])
 analyze_attachments = _resolve_node(".nodes.analyze_attachments", ["analyze_attachments", "run", "node"])
@@ -80,8 +81,13 @@ def _truthy(x: Any) -> bool:
 _ALLOWED_EVENT_TYPES = {
     "CHECKIN_CREATED",
     "CHECKIN_UPDATED",
+    "CHECKIN_DELETED",       # NEW — wootzcheckin only (soft-delete)
     "CONVERSATION_ADDED",
+    "CONVERSATION_UPDATED",  # NEW — wootzcheckin only (edit)
+    "CONVERSATION_DELETED",  # NEW — wootzcheckin only (soft-delete)
+    "CCP_CREATED",           # NEW — wootzcheckin only
     "CCP_UPDATED",
+    "CCP_DELETED",           # NEW — wootzcheckin only (hard delete)
     "DASHBOARD_UPDATED",
     "PROJECT_UPDATED",   # NEW (cron/status->mfg trigger)
     "MANUAL_TRIGGER",
@@ -115,14 +121,14 @@ def _primary_id_for_event(payload: Dict[str, Any], event_type: str) -> str:
     if event_type == "PROJECT_UPDATED":
         return legacy_id or "UNKNOWN_PROJECT"
     
-    if event_type in ("CHECKIN_CREATED", "CHECKIN_UPDATED"):
+    if event_type in ("CHECKIN_CREATED", "CHECKIN_UPDATED", "CHECKIN_DELETED"):
         return checkin_id or "UNKNOWN_CHECKIN"
 
-    if event_type == "CONVERSATION_ADDED":
+    if event_type in ("CONVERSATION_ADDED", "CONVERSATION_UPDATED", "CONVERSATION_DELETED"):
         # THIS is the key fix
         return conversation_id or "UNKNOWN_CONVO"
 
-    if event_type == "CCP_UPDATED":
+    if event_type in ("CCP_CREATED", "CCP_UPDATED", "CCP_DELETED"):
         return ccp_id or "UNKNOWN_CCP"
 
     if event_type == "DASHBOARD_UPDATED":
@@ -230,23 +236,41 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
             # -------------------------
             # CCP incremental ingestion
             # -------------------------
-            if event_type == "CCP_UPDATED":
+            if event_type in ("CCP_CREATED", "CCP_UPDATED"):
                 ccp_id = str(payload.get("ccp_id") or "").strip()
                 if not ccp_id:
                     runlog.success(run_id)
                     return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing ccp_id", "logs": state.get("logs")}
 
-                from .ingest.ccp_ingest import ingest_ccp_one
-
-                out = ingest_ccp_one(settings, ccp_id=ccp_id)
-                # Also refresh assembly checklist if project is already in MFG
-                try:
-                    state["payload"] = payload
-                    state = _timed("generate_assembly_todo", generate_assembly_todo)
-                except Exception as _e:
-                    (state.get("logs") or []).append(f"assembly_todo: non-fatal after CCP_UPDATED: {_e}")
+                source = str(payload.get("source") or "sheets").strip()
+                if source == "wootzcheckin":
+                    from .ingest.ccp_ingest import ingest_ccp_one_wootz
+                    out = ingest_ccp_one_wootz(settings, ccp_id=ccp_id)
+                    # No assembly_todo/cues refresh for wootzcheckin-sourced
+                    # CCPs — that's an AppSheet-only concept.
+                else:
+                    from .ingest.ccp_ingest import ingest_ccp_one
+                    out = ingest_ccp_one(settings, ccp_id=ccp_id)
+                    # Also refresh assembly checklist if project is already in MFG
+                    try:
+                        state["payload"] = payload
+                        state = _timed("generate_assembly_todo", generate_assembly_todo)
+                    except Exception as _e:
+                        (state.get("logs") or []).append(f"assembly_todo: non-fatal after {event_type}: {_e}")
                 runlog.success(run_id)
                 return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "result": out, "logs": state.get("logs")}
+
+            if event_type == "CCP_DELETED":
+                ccp_id = str(payload.get("ccp_id") or "").strip()
+                if not ccp_id:
+                    runlog.success(run_id)
+                    return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing ccp_id", "logs": state.get("logs")}
+
+                from ..tools.vector_tool import VectorTool
+                VectorTool(settings).delete_ccp_vectors(ccp_id=ccp_id)
+                (state.get("logs") or []).append(f"CCP_DELETED: removed ccp_vectors for ccp_id={ccp_id}")
+                runlog.success(run_id)
+                return {"run_id": run_id, "ok": True, "event_type": event_type, "ccp_id": ccp_id, "logs": state.get("logs")}
 
             # ------------------------------
             # Dashboard incremental ingestion
@@ -326,25 +350,77 @@ def run_event_graph(settings: Settings, payload: Dict[str, Any]) -> Dict[str, An
                     "logs": state.get("logs"),
                 }
             # -------------------------
+            # Checkin deletion (wootzcheckin only — soft-delete)
+            # -------------------------
+            # Unlike CHECKIN_UPDATED, this doesn't re-run the full ingest
+            # pipeline — the checkin's history no longer belongs in the
+            # retrieval index, so its vectors are removed outright rather
+            # than re-embedded.
+            if event_type == "CHECKIN_DELETED":
+                checkin_id = str(payload.get("checkin_id") or "").strip()
+                if not checkin_id:
+                    runlog.success(run_id)
+                    return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing checkin_id", "logs": state.get("logs")}
+
+                from ..tools.wootzcheckin_client import WootzCheckinClient
+                from ..tools.vector_tool import VectorTool
+
+                # Soft-delete only sets deleted_at — the row (and its
+                # project/tenant) is still fetchable via cqts-context.
+                try:
+                    ctx = WootzCheckinClient(settings).get_checkin_context(checkin_id)
+                    tenant_id_for_delete = str((ctx.get("project") or {}).get("companyRowId") or "").strip()
+                except Exception as e:
+                    (state.get("logs") or []).append(f"CHECKIN_DELETED: context lookup failed: {e}")
+                    tenant_id_for_delete = ""
+
+                if not tenant_id_for_delete:
+                    runlog.success(run_id)
+                    return {"run_id": run_id, "ok": True, "skipped": True, "reason": "missing tenant_id", "logs": state.get("logs")}
+
+                VectorTool(settings).delete_incident_vectors(tenant_id=tenant_id_for_delete, checkin_id=checkin_id)
+                (state.get("logs") or []).append(f"CHECKIN_DELETED: removed incident_vectors for checkin_id={checkin_id}")
+                runlog.success(run_id)
+                return {"run_id": run_id, "ok": True, "event_type": event_type, "checkin_id": checkin_id, "logs": state.get("logs")}
+
+            # -------------------------
             # Checkin / Conversation flow
             # -------------------------
-            # Reply/writeback ONLY for CHECKIN_CREATED (your requirement)
+            # Reply/writeback ONLY for CHECKIN_CREATED sourced from Sheets/
+            # AppSheet (the original requirement, unchanged). wootzcheckin-
+            # sourced events are always ingest-only — AI reply/writeback for
+            # wootzcheckin checkins is a separate, not-yet-built feature;
+            # daily CQTS classification (cqts_graph.py) covers wootzcheckin
+            # checkins instead. CONVERSATION_UPDATED/CONVERSATION_DELETED
+            # (wootzcheckin only) join the existing ingest-only set for the
+            # same reason CONVERSATION_ADDED already is — none of the three
+            # ever get a reply, they just need the parent checkin re-ingested.
+            source = str(payload.get("source") or "sheets").strip()
+            is_wootz = source == "wootzcheckin"
+
             force_reply = _truthy(m.get("force_reply"))
-            ingest_only_default = event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED")
+            ingest_only_default = (
+                event_type in ("CHECKIN_UPDATED", "CONVERSATION_ADDED", "CONVERSATION_UPDATED", "CONVERSATION_DELETED")
+                or is_wootz
+            )
             ingest_only = _truthy(m.get("ingest_only") or m.get("skip_reply") or m.get("skip_ai_reply")) or ingest_only_default
-            if event_type == "CHECKIN_CREATED" and force_reply:
+            if event_type == "CHECKIN_CREATED" and force_reply and not is_wootz:
                 ingest_only = False
 
             media_only = _truthy(m.get("media_only"))
 
-            state = _timed("load_sheet_data", load_sheet_data)
+            loader = load_wootz_data if is_wootz else load_sheet_data
+            state = _timed(f"load_data[{source}]", loader)
 
-            # Always try to refresh assembly checklist after any relevant event.
-            # Node itself will skip unless Project.Status_assembly == 'mfg'.
-            try:
-                state = _timed("generate_assembly_todo", generate_assembly_todo)
-            except Exception as _e:
-                (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
+            # Always try to refresh assembly checklist after any relevant
+            # Sheets/AppSheet event. Node itself will skip unless
+            # Project.Status_assembly == 'mfg'. Cues/assembly_todo is an
+            # AppSheet-only concept — skipped entirely for wootzcheckin.
+            if not is_wootz:
+                try:
+                    state = _timed("generate_assembly_todo", generate_assembly_todo)
+                except Exception as _e:
+                    (state.get("logs") or []).append(f"assembly_todo: non-fatal failure: {_e}")
 
             tenant_id = str(state.get("tenant_id") or "").strip()
             if tenant_id and tenant_id != tenant_id_hint:

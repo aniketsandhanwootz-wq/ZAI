@@ -316,6 +316,24 @@ class VectorTool:
                 ),
             )
 
+    def delete_incident_vectors(self, *, tenant_id: str, checkin_id: str) -> None:
+        """Removes all vector_type rows (PROBLEM/RESOLUTION/MEDIA) for a
+        checkin — used on CHECKIN_DELETED so a deleted checkin's history
+        stops surfacing in future retrieval."""
+        sql = "DELETE FROM incident_vectors WHERE tenant_id = %s AND checkin_id = %s"
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (tenant_id, checkin_id))
+
+    def delete_ccp_vectors(self, *, ccp_id: str) -> None:
+        """Removes all chunks for a CCP — used on CCP_DELETED. Filtered by
+        ccp_id alone (globally unique, wootzcheckin's ccp table primary key)
+        rather than also scoping to tenant_id: wootzcheckin hard-deletes CCP
+        rows, so by the time this event fires the row (and its tenant_id) is
+        already gone — there's nothing left to look it up from."""
+        sql = "DELETE FROM ccp_vectors WHERE ccp_id = %s"
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, (ccp_id,))
+
     def upsert_ccp_chunk(
         self,
         *,
@@ -588,19 +606,25 @@ class VectorTool:
         part_number: Optional[str] = None,
         legacy_id: Optional[str] = None,   # NEW
     ) -> List[Dict[str, Any]]:
+        # Hard filters, not soft OR-NULL — a CCP search must never surface
+        # another project's CCPs. (Previously "project_name=%s OR
+        # project_name IS NULL", which would have let any CCP row missing
+        # project metadata leak into every project's results; live data
+        # currently has zero such rows, so this tightening is a no-op today
+        # and a guarantee going forward.)
         where = ["tenant_id=%s"]
         args: List[Any] = [tenant_id]
 
         if project_name:
-            where.append("(project_name=%s OR project_name IS NULL)")
+            where.append("project_name=%s")
             args.append(project_name)
 
         if part_number:
-            where.append("(part_number=%s OR part_number IS NULL)")
+            where.append("part_number=%s")
             args.append(part_number)
 
         if legacy_id:
-            where.append("(legacy_id=%s OR legacy_id IS NULL)")
+            where.append("legacy_id=%s")
             args.append(legacy_id)
 
         sql = f"""

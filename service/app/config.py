@@ -258,6 +258,14 @@ class Settings:
     # Power Automate (Teams routing flow webhook)
     power_automate_webhook_url: str
 
+    # wootzcheckin internal API (CQTS classification — daily batch)
+    wootzcheckin_api_url: str
+    wootzcheckin_api_secret: str
+
+    # wootzcheckin real-time ingestion webhook (checkin/conversation/CCP
+    # create/update/delete pushed from backend/apps/worker/src/index.ts)
+    wootzcheckin_webhook_secret: str
+
     # ✅ Single webhook secret for Apps Script
     webhook_secret: str
 
@@ -421,6 +429,11 @@ def load_settings() -> Settings:
     # Power Automate (Teams routing flow webhook)
     power_automate_webhook_url = _get_env("POWER_AUTOMATE_WEBHOOK_URL", teams_webhook_url)
 
+    # wootzcheckin internal API (CQTS classification — daily batch, see cqts_graph.py)
+    wootzcheckin_api_url = _get_env("WOOTZCHECKIN_API_URL", "").rstrip("/")
+    wootzcheckin_api_secret = _get_env("WOOTZCHECKIN_API_SECRET", "")
+    wootzcheckin_webhook_secret = _get_env("WOOTZCHECKIN_WEBHOOK_SECRET", "")
+
     # Sheets auth
     sa_raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     sa_raw = (sa_raw or "").strip()
@@ -518,6 +531,9 @@ def load_settings() -> Settings:
         appsheet_conversation_key_col=appsheet_conversation_key_col,
         appsheet_conversation_critical_col=appsheet_conversation_critical_col,
         power_automate_webhook_url=power_automate_webhook_url,
+        wootzcheckin_api_url=wootzcheckin_api_url,
+        wootzcheckin_api_secret=wootzcheckin_api_secret,
+        wootzcheckin_webhook_secret=wootzcheckin_webhook_secret,
         webhook_secret=webhook_secret,
         llm_provider=llm_provider,
         llm_api_key=llm_api_key,

@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY service/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY service/app /app/app
+COPY service/scripts /app/app/scripts
+COPY packages /app/packages
+RUN ln -s /app/packages /packages
+
+# run-once job — daily CQTS (Cost/Quality/Timeline/Scope) classification batch.
+# Concurrency matches the flowchart's cap; add --dry-run via Render's command
+# override for a trial run that logs but never writes back.
+CMD ["python", "-m", "app.scripts.run_cqts_classification", "--concurrency", "4"]
